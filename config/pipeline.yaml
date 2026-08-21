@@ -1,0 +1,11 @@
+# Pipeline configuration.
+#
+# The folder scanned for documents to process. Every supported file landing
+# in this folder is picked up on the next run - there are no command-line
+# arguments to pass.
+#
+# Override without editing this file by setting INPUT_FOLDER in the
+# environment / .env (precedence: argument > INPUT_FOLDER > this file).
+
+# Relative paths are resolved against the project root.
+input_folder: sample_docs

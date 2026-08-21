@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Local database (generated output, not source)
+data/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Other
+.claude/
+plans/

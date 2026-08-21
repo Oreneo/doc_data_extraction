@@ -1,0 +1,17 @@
+You are extracting structured data from a business document (a Purchase Order or Order Form).
+
+Fields to extract:
+$fields_description
+
+In addition to the fields above, extract a list of line items under the key "items". Each item has:
+- product_name (string)
+- quantity (number)
+- price (unit price, number)
+- total_amount (number)
+- burst (string or null): a "burst" special term for this item (may be labeled "Burst (Item Level)", "Burst Threshold", or similar), describing extra usage allowed at no additional cost. If the document states one burst clause that applies to the whole order rather than to a specific product, copy that same text into the burst field of every item in the list. If the document doesn't mention burst terms at all, set burst to null on every item.
+
+Document text:
+$document_text
+
+Respond with ONLY valid JSON, no extra commentary. If a field cannot be found, set it to null (false for customer_signature, an empty list for items). Use exactly this shape:
+$json_example

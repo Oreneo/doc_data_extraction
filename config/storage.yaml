@@ -1,0 +1,13 @@
+# Local storage configuration.
+#
+# The extraction results are persisted to a SQLite database - a full
+# relational engine embedded in Python, so there is no server to install or
+# run. The entire database is the single file named below.
+#
+# Override without editing this file by setting DATABASE_PATH in the
+# environment / .env (precedence: argument > DATABASE_PATH > this file).
+# Setting DATABASE_PATH=":memory:" gives a throwaway in-memory database -
+# useful for a dry run that writes nothing to disk.
+
+# Relative paths are resolved against the project root.
+database_path: data/extractions.db

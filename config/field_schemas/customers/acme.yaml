@@ -1,0 +1,13 @@
+# Customer profile: ACME Corporation (Order Form)
+
+match_keywords:
+  - "ACME"
+  - "Acme Corporation"
+
+overrides:
+  - name: technical_account_manager
+    description: >
+      This customer's order forms don't use the literal term "Technical Account
+      Manager" - look instead for equivalent language such as a "Customer
+      Support Manager" or "Product Architect" being assigned to the customer,
+      usually listed under "Special Terms".

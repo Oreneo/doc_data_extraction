@@ -1,0 +1,10 @@
+# Customer profile: NovaFleet Technologies Inc. (Purchase Order)
+#
+# No field overrides needed - NovaFleet's purchase orders already use the
+# spec's exact terminology ("Net 45", "Technical Account Manager", etc.),
+# so the base field definitions apply as-is.
+
+match_keywords:
+  - "NovaFleet"
+
+overrides: []

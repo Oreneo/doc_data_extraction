@@ -1,0 +1,10 @@
+# Customer profile: BrightOps Analytics Ltd. (Purchase Order)
+#
+# No field overrides needed - BrightOps's purchase orders already use the
+# spec's exact terminology ("Net 30", "Technical Account Manager", etc.),
+# so the base field definitions apply as-is.
+
+match_keywords:
+  - "BrightOps"
+
+overrides: []
