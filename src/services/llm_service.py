@@ -100,9 +100,25 @@ class LLMService:
                     timeout=self.config.timeout,
                 )
 
+                # `content` can legitimately be None rather than a string:
+                # some models return an empty completion, and reasoning-tuned
+                # ones may put their output in a separate field. Calling
+                # .strip() on that raised an AttributeError that surfaced as a
+                # baffling "'NoneType' object has no attribute 'strip'" after
+                # burning every retry, so handle it explicitly.
+                content = response.choices[0].message.content
+                content = content.strip() if content else ""
+
+                if not content:
+                    raise ValueError(
+                        f"Model '{model}' returned an empty response "
+                        f"(no content). It may be unavailable on this tier, "
+                        f"or unsuited to this prompt."
+                    )
+
                 return {
                     "success": True,
-                    "response": response.choices[0].message.content.strip(),
+                    "response": content,
                     "model": model
                 }
 

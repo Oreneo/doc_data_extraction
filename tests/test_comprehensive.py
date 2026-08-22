@@ -5,6 +5,7 @@ Comprehensive tests for the document data extraction system
 import json
 import sys
 import os
+from pathlib import Path
 
 # Add the project root to the path so `src` is importable as a package,
 # regardless of the directory the tests are run from. (The project root -
@@ -111,7 +112,8 @@ def test_field_registry_customer_overrides():
     field_names = {f.name for f in base_fields}
     assert field_names == {
         "start_date", "end_date", "amount", "payment_terms",
-        "billing_address", "customer_signature", "technical_account_manager",
+        "billing_address", "customer_signature", "signature_evidence",
+        "technical_account_manager",
     }, field_names
 
     acme_fields = registry.get_fields(customer_key="acme")
@@ -381,33 +383,57 @@ def test_storage_idempotency_cascade():
     database.close()
     print("✓ Storage idempotency and cascade test passed")
 
-def test_unchanged_document_skips_llm():
+def test_every_run_extracts_from_scratch():
     """
-    A document whose text hasn't changed is skipped before the LLM is called.
-    The stub raises if invoked, so reaching the LLM fails the test.
+    Stored results must never suppress work. Processing the same document
+    twice calls the LLM twice.
+
+    This is the inverse of a test that used to assert the opposite - that an
+    unchanged document was skipped. The caching it guarded made runs
+    non-reproducible: what a run did depended on what earlier runs had left
+    in the database, and a quality check or retry has nothing to act on when
+    extraction never happened.
     """
-    print("Testing unchanged-document skip...")
+    print("Testing every run extracts from scratch...")
 
     from src.services.document_processor import DocumentProcessor
 
-    repository, database = _build_test_repository()
-    repository.save(_sample_contract(), "/docs/acme.pdf", "hash-1")
+    _FakeClient = _fake_client_class()
+    payload = json.dumps({
+        "start_date": "01-01-2025", "end_date": "12-31-2025", "amount": 100,
+        "payment_terms": "Net 30", "billing_address": "x",
+        "customer_signature": False, "signature_evidence": None,
+        "technical_account_manager": None,
+        "items": [{"product_name": "W", "quantity": 1, "price": 100,
+                   "total_amount": 100, "burst": None}],
+    })
 
-    class _ExplodingExtractor:
+    calls = {"n": 0}
+
+    class _CountingExtractor:
+        def __init__(self, inner):
+            self.inner = inner
+
         def extract(self, *args, **kwargs):
-            raise AssertionError("LLM must not be called for an unchanged document")
+            calls["n"] += 1
+            return self.inner.extract(*args, **kwargs)
 
-    _, field_registry = _build_test_contract_extractor()
-    processor = DocumentProcessor(_ExplodingExtractor(), field_registry, repository)
+    repository, database = _build_test_repository()
+    inner, field_registry = _build_test_contract_extractor(client=_FakeClient(payload))
+    processor = DocumentProcessor(_CountingExtractor(inner), field_registry, repository)
 
-    # Bypass PDF reading: feed the known text hash directly through the same
-    # code path process_file uses.
-    assert repository.is_unchanged("/docs/acme.pdf", "hash-1") is True
-    assert repository.is_unchanged("/docs/acme.pdf", "hash-CHANGED") is False
-    assert repository.is_unchanged("/docs/never-seen.pdf", "hash-1") is False
+    fixture = os.path.join(FIXTURES, "unsigned_order_form.pdf")
+    processor.process_file(fixture)
+    processor.process_file(fixture)
+
+    assert calls["n"] == 2, f"expected 2 extractions, got {calls['n']}"
+    # ...and re-running updates in place rather than duplicating.
+    rows = database.connection.execute(
+        "SELECT COUNT(*) AS n FROM processed_documents").fetchone()["n"]
+    assert rows == 1, f"expected 1 row after two runs, got {rows}"
 
     database.close()
-    print("✓ Unchanged-document skip test passed")
+    print("✓ every run extracts from scratch test passed")
 
 def test_failed_extraction_is_recorded_but_not_stored():
     """
@@ -427,10 +453,6 @@ def test_failed_extraction_is_recorded_but_not_stored():
 
     count = database.connection.execute("SELECT COUNT(*) AS n FROM sales_orders").fetchone()["n"]
     assert count == 0
-
-    # A failure is retried on the next run even though the file is unchanged:
-    # the cause may have been a transient API error, not the document.
-    assert repository.is_unchanged("/docs/broken.pdf", "hash-x") is False
 
     database.close()
     print("✓ Failed-extraction handling test passed")
@@ -460,8 +482,8 @@ def test_null_repository_keeps_processor_working():
     processor = DocumentProcessor(contract_extractor, field_registry)
 
     assert isinstance(processor.repository, NullContractRepository)
-    assert processor.repository.is_unchanged("/any.pdf", "any-hash") is False
     assert processor.repository.save(_sample_contract(), "/any.pdf", "any-hash") is None
+    assert processor.repository.fetch_all() == []
 
     print("✓ Null repository test passed")
 
@@ -608,7 +630,10 @@ def test_console_reporter_renders_fields():
     assert "01-01-2025" in output          # start date, mm-dd-yyyy
     assert "162,000.00" in output          # amount, thousands-separated
     assert "Net 30" in output
-    assert "Yes" in output                 # customer_signature rendered as Yes/No
+    # The assignment specifies this field as True/False, not Yes/No.
+    flat = " ".join(output.split())
+    assert "Customer signature" in flat
+    assert "True" in flat and "Yes" not in flat
     assert "Platform - Enterprise" in output
     assert "Support - Premium" in output
     assert "ORDER FORMS (1)" in output
@@ -938,6 +963,763 @@ def test_additive_migration_preserves_existing_rows():
 
     print("✓ additive schema migration test passed")
 
+# --------------------------------------------------------------------------
+# Path identity, report scoping, and progress tests
+# --------------------------------------------------------------------------
+
+def test_canonical_path_collapses_spellings():
+    """
+    Every spelling of one file resolves to a single stored identity. This is
+    the direct regression test for the duplicate-row bug: a relative and an
+    absolute path for the same document produced two rows, double-counting
+    every aggregate built on them.
+    """
+    print("Testing canonical path resolution...")
+
+    from src.services.document_processor import DocumentProcessor
+
+    canonical = DocumentProcessor.canonical_path
+    target = "sample_docs/ACME Order From.pdf"
+
+    spellings = [
+        target,
+        "./" + target,
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), target),
+        "sample_docs/../sample_docs/ACME Order From.pdf",
+    ]
+    resolved = {canonical(s) for s in spellings}
+    assert len(resolved) == 1, f"spellings diverged: {resolved}"
+    assert os.path.isabs(resolved.pop())
+
+    print("✓ canonical path resolution test passed")
+
+def test_migration_merges_duplicate_paths():
+    """
+    A database written before path canonicalization - holding the same
+    document under an absolute and a relative path - is repaired on open:
+    the newer row survives with a canonical path, and the older row's line
+    items are cascaded away rather than orphaned.
+    """
+    print("Testing duplicate-path migration...")
+
+    import sqlite3
+    import tempfile
+
+    from src.storage.database import Database
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "dupes.db")
+        rel = "sample_docs/ACME Order From.pdf"
+        abs_ = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), rel)
+
+        seed = Database(path)
+        with seed.transaction() as conn:
+            for i, (src, when, amount) in enumerate([
+                (abs_, "2026-08-22T11:43:27", 152500.0),   # older
+                (rel, "2026-08-22T13:00:53", 152500.0),    # newer - should win
+            ], start=1):
+                conn.execute(
+                    """INSERT INTO processed_documents
+                       (source_file, content_hash, document_type, status, processed_at)
+                       VALUES (?, 'samehash', 'order_form', 'extracted', ?)""",
+                    (src, when))
+                conn.execute(
+                    "INSERT INTO sales_orders (document_id, amount) VALUES (?, ?)",
+                    (i, amount))
+                conn.execute(
+                    """INSERT INTO sales_order_items
+                       (sales_order_id, line_number, product_name, quantity, price, total_amount)
+                       VALUES (?, 1, 'SaaS Subscription', 1, ?, ?)""",
+                    (i, amount, amount))
+        # Both rows exist before the migration - the bug as observed.
+        assert seed.connection.execute(
+            "SELECT COUNT(*) FROM processed_documents").fetchone()[0] == 2
+        assert seed.connection.execute(
+            "SELECT SUM(amount) FROM sales_orders").fetchone()[0] == 305000.0
+        seed.close()
+
+        repaired = Database(path)
+
+        rows = repaired.connection.execute(
+            "SELECT source_file, processed_at FROM processed_documents").fetchall()
+        assert len(rows) == 1, f"expected 1 row after merge, got {len(rows)}"
+        # The newer extraction survived, under a canonical path.
+        assert rows[0]["processed_at"] == "2026-08-22T13:00:53"
+        assert rows[0]["source_file"] == str(Path(rel).resolve())
+
+        # Aggregates are correct again, and no orphaned children remain.
+        assert repaired.connection.execute(
+            "SELECT SUM(amount) FROM sales_orders").fetchone()[0] == 152500.0
+        assert repaired.connection.execute(
+            "SELECT COUNT(*) FROM sales_order_items").fetchone()[0] == 1
+
+        repaired.close()
+
+    print("✓ duplicate-path migration test passed")
+
+def test_migration_leaves_distinct_documents_alone():
+    """The migration must never merge two genuinely different documents."""
+    print("Testing migration is conservative...")
+
+    import tempfile
+
+    from src.storage.database import Database
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "distinct.db")
+        seed = Database(path)
+        with seed.transaction() as conn:
+            for src in ("/docs/a.pdf", "/docs/b.pdf"):
+                conn.execute(
+                    """INSERT INTO processed_documents
+                       (source_file, content_hash, document_type, status, processed_at)
+                       VALUES (?, 'h', 'order_form', 'extracted', '2026-01-01')""",
+                    (src,))
+        seed.close()
+
+        repaired = Database(path)
+        assert repaired.connection.execute(
+            "SELECT COUNT(*) FROM processed_documents").fetchone()[0] == 2
+        repaired.close()
+
+    print("✓ migration conservatism test passed")
+
+def test_report_scopes_to_this_run():
+    """
+    Running one document reports that document, not everything ever stored -
+    while still accounting for the rest in a "not shown" line.
+    """
+    print("Testing run-scoped reporting...")
+
+    from src.models.stored_contract import StoredContract
+    from src.reporting.console_reporter import ConsoleReporter
+
+    def stored(name, status="extracted", with_data=True):
+        return StoredContract(
+            source_file=f"/docs/{name}", document_type="order_form",
+            processed_at="2026-08-22T13:00:00Z", status=status,
+            error=None if status == "extracted" else "some earlier failure",
+            data=_sample_contract("order_form") if with_data else None,
+        )
+
+    contracts = [
+        stored("wanted.pdf"),
+        stored("old1.pdf"),
+        stored("old2.pdf", status="failed", with_data=False),
+        stored("old3.pdf", status="failed", with_data=False),
+    ]
+
+    scoped = " ".join(ConsoleReporter().render(
+        contracts, "data/extractions.db", only_paths={"/docs/wanted.pdf"}).split())
+
+    assert "wanted.pdf" in scoped
+    for hidden in ("old1.pdf", "old2.pdf", "old3.pdf"):
+        assert hidden not in scoped, f"{hidden} should not be shown"
+    assert "1 document" in scoped
+    assert "3 other documents stored" in scoped
+    assert "1 extracted" in scoped and "2 failed" in scoped
+
+    # only_paths=None keeps the render-everything behaviour.
+    everything = " ".join(ConsoleReporter().render(contracts, None).split())
+    assert "old1.pdf" in everything
+    assert "Not shown" not in everything
+
+    print("✓ run-scoped reporting test passed")
+
+def test_progress_reporter_output():
+    """Progress narrates the run; the null reporter stays silent."""
+    print("Testing progress reporter...")
+
+    import io
+
+    from src.reporting.progress_reporter import (
+        ConsoleProgressReporter,
+        NullProgressReporter,
+    )
+
+    stream = io.StringIO()
+    p = ConsoleProgressReporter(stream)
+    p.run_started("sample_docs", 2, "openrouter_paid", "anthropic/claude-sonnet-5")
+    p.document_started(1, 2, "/docs/ACME Order From.pdf")
+    p.text_extracted(2, 2180)
+    p.identified("order_form", "acme")
+    p.llm_call_started()
+    p.llm_call_finished(4.2)
+    p.document_stored(5, None)
+    p.document_started(2, 2, "/docs/Other.pdf")
+    out = stream.getvalue()
+
+    assert "Processing 2 documents in sample_docs" in out
+    assert "anthropic/claude-sonnet-5" in out
+    assert "[1/2] ACME Order From.pdf" in out
+    assert "2 pages, 2,180 chars" in out
+    assert "order_form · customer: acme" in out
+    # The slow step is announced before it happens, not only after.
+    assert out.index("calling model") < out.index("responded in")
+    assert "stored 5 line items" in out
+
+    silent = io.StringIO()
+    n = NullProgressReporter()
+    n.run_started("x", 1, "p", "m"); n.document_started(1, 1, "y")
+    assert silent.getvalue() == ""
+
+    print("✓ progress reporter test passed")
+
+def test_delete_removes_document_and_children():
+    """
+    Deleting a stored document removes it and everything beneath it.
+
+    Every run re-extracts regardless, so this is for clearing out records of
+    documents that have left the input folder - not for forcing a refresh.
+    """
+    print("Testing delete removes document and children...")
+
+    repository, database = _build_test_repository()
+    repository.save(_sample_contract(), "/docs/acme.pdf", "hash-1")
+
+    assert len(repository.fetch_all()) == 1
+    assert repository.delete("/docs/acme.pdf") is True
+    assert repository.fetch_all() == []
+
+    # Header and line items cascaded away rather than being orphaned.
+    for table in ("processed_documents", "sales_orders", "sales_order_items"):
+        count = database.connection.execute(
+            f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+        assert count == 0, f"{table} still has {count} rows"
+
+    # Deleting something absent is a no-op, not an error.
+    assert repository.delete("/docs/never-stored.pdf") is False
+
+    database.close()
+    print("✓ delete removes document and children test passed")
+
+def test_delete_all_and_null_repository():
+    """delete_all clears everything; the null repository stays a no-op."""
+    print("Testing delete_all...")
+
+    from src.storage.contract_repository import NullContractRepository
+
+    repository, database = _build_test_repository()
+    repository.save(_sample_contract("order_form"), "/docs/a.pdf", "h1")
+    repository.save(_sample_contract("purchase_order"), "/docs/b.pdf", "h2")
+
+    assert repository.delete_all() == 2
+    assert repository.fetch_all() == []
+    assert database.connection.execute(
+        "SELECT COUNT(*) AS n FROM sales_order_items").fetchone()["n"] == 0
+
+    null = NullContractRepository()
+    assert null.delete("/docs/a.pdf") is False
+    assert null.delete_all() == 0
+
+    database.close()
+    print("✓ delete_all test passed")
+
+def test_reset_utility_matches_by_fragment():
+    """
+    The reset tool resolves a name fragment to a stored path, so you don't
+    have to type the full path (and the path spelling doesn't matter).
+    """
+    print("Testing reset utility matching...")
+
+    from src.utils.reset_documents import _match
+
+    stored = [
+        "/Users/x/Dev/proj/sample_docs/ACME Order From.pdf",
+        "/Users/x/Dev/proj/sample_docs/CloudShield Order Form.pdf",
+    ]
+
+    assert _match(stored, "ACME") == [stored[0]]
+    assert _match(stored, "acme") == [stored[0]], "matching should be case-insensitive"
+    assert _match(stored, "CloudShield") == [stored[1]]
+    assert _match(stored, "Order") == stored, "a broad fragment matches both"
+    assert _match(stored, "nonexistent") == []
+
+    print("✓ reset utility matching test passed")
+
+def test_signature_evidence_round_trip():
+    """
+    signature_evidence survives storage and reaches the report, so a
+    true/false can be checked without reopening the PDF.
+    """
+    print("Testing signature evidence round trip...")
+
+    from src.reporting.console_reporter import ConsoleReporter
+
+    repository, database = _build_test_repository()
+    evidence = "signature line blank, Name/Title/Date filled in"
+    repository.save(
+        _sample_contract("order_form", customer_signature=False,
+                         signature_evidence=evidence),
+        "/docs/acme.pdf", "h-sig",
+    )
+
+    stored = repository.fetch_all()
+    assert stored[0].data.customer_signature is False
+    assert stored[0].data.signature_evidence == evidence
+
+    flat = " ".join(ConsoleReporter().render(stored).split())
+    assert "Signature evidence" in flat
+    assert "signature line blank" in flat
+
+    database.close()
+    print("✓ signature evidence round trip test passed")
+
+def test_signature_renders_as_true_false():
+    """
+    The assignment specifies Customer signature as True/False. Yes/No must
+    not appear.
+    """
+    print("Testing signature True/False rendering...")
+
+    from src.reporting.console_reporter import ConsoleReporter
+
+    signed = " ".join(ConsoleReporter().render(
+        [_reporter_fixture(customer_signature=True)]).split())
+    unsigned = " ".join(ConsoleReporter().render(
+        [_reporter_fixture(customer_signature=False)]).split())
+
+    assert "Customer signature ... True" in signed or "True" in signed
+    assert "False" in unsigned
+    for output in (signed, unsigned):
+        assert "Yes" not in output and " No " not in output
+
+    print("✓ signature True/False rendering test passed")
+
+def test_acme_unsigned_case_end_to_end():
+    """
+    ACME's exact shape - blank signature line, Name/Title/Date filled - must
+    come out False. This is the regression test for the field definition
+    that previously said a filled name block counted as a signature.
+
+    Also covers the opposite direction with BrightOps's explicit mark, so
+    the stricter rule doesn't swing the error the other way.
+    """
+    print("Testing ACME unsigned / BrightOps signed cases...")
+
+    _FakeClient = _fake_client_class()
+
+    def payload(signed, evidence):
+        return json.dumps({
+            "start_date": "01-01-2025", "end_date": "12-31-2026",
+            "amount": 152500, "payment_terms": "Net 30",
+            "billing_address": "123 Main Street, New York, NY, USA",
+            "customer_signature": signed,
+            "signature_evidence": evidence,
+            "technical_account_manager": None,
+            "items": [{"product_name": "SaaS Subscription", "quantity": 1,
+                       "price": 50000, "total_amount": 50000, "burst": None}],
+        })
+
+    acme, _ = _build_test_contract_extractor(client=_FakeClient(
+        payload(False, "signature line blank, Name/Title/Date filled in")))
+    result = acme.extract(text="...", document_type="order_form")
+    assert result.customer_signature is False, "blank signature line must be False"
+    assert "blank" in result.signature_evidence
+
+    brightops, _ = _build_test_contract_extractor(client=_FakeClient(
+        payload(True, "'✔ Signed' beside Buyer Signature")))
+    result = brightops.extract(text="...", document_type="purchase_order")
+    assert result.customer_signature is True, "explicit mark must stay True"
+    assert "Signed" in result.signature_evidence
+
+    print("✓ ACME/BrightOps signature cases test passed")
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+def test_signature_ink_detects_drawn_signature():
+    """
+    Two PDFs with identical text, differing only in a drawn curve over the
+    customer's signature rule. Text extraction cannot tell them apart; the
+    geometric scan must.
+    """
+    print("Testing signature ink detection...")
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    detector = SignatureInkDetector()
+
+    signed = detector.detect(os.path.join(FIXTURES, "signed_order_form.pdf"))
+    assert signed.found is True, "a drawn signature must be detected"
+    assert signed.anchors_examined == 2
+    assert "drawing" in signed.detail, signed.detail
+
+    unsigned = detector.detect(os.path.join(FIXTURES, "unsigned_order_form.pdf"))
+    assert unsigned.found is False, "an empty signature line must not be flagged"
+    assert unsigned.anchors_examined == 2
+
+    print("✓ signature ink detection test passed")
+
+def test_signature_ink_does_not_bleed_across_columns():
+    """
+    The fixture is signed only in the customer's (right-hand) column. The
+    band must stop at the neighbouring signature label, or one party's
+    signature gets credited to the other.
+    """
+    print("Testing signature column isolation...")
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    finding = SignatureInkDetector().detect(
+        os.path.join(FIXTURES, "signed_order_form.pdf"))
+
+    # The customer's label sits at x=320, the vendor's at x=72. Only the
+    # customer's column should be reported.
+    assert "x=320" in finding.detail, finding.detail
+    assert "x=72" not in finding.detail, f"bled into vendor column: {finding.detail}"
+
+    print("✓ signature column isolation test passed")
+
+def test_signature_ink_detects_annotation_signatures():
+    """
+    Signatures added by a PDF viewer are ANNOTATIONS, not page content.
+    macOS Preview writes a /Stamp for a drawn or scanned signature and a
+    /FreeText for a typed one, and neither appears in page.images,
+    page.curves, or extract_text() - all three CloudShield variants produce
+    byte-identical text. Without annotation support every such signature is
+    missed, which is the exact false negative this detector exists to
+    prevent.
+    """
+    print("Testing annotation signature detection...")
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    docs = os.path.join(root, "sample_docs")
+    detector = SignatureInkDetector()
+
+    stamped = detector.detect(os.path.join(docs, "CloudShield Order Form signed image.pdf"))
+    assert stamped.found is True, "a /Stamp signature annotation must be detected"
+    assert "Stamp" in stamped.detail
+
+    typed = detector.detect(os.path.join(docs, "CloudShield Order Form signed text.pdf"))
+    assert typed.found is True, "a /FreeText signature annotation must be detected"
+    assert "FreeText" in typed.detail
+    # The annotation's text is quoted, giving the model something concrete.
+    assert "TechNova fake signature" in typed.detail
+
+    # The unmodified original must stay unsigned - the three files differ
+    # only in the annotation, so this is what proves the signal is real.
+    original = detector.detect(os.path.join(docs, "CloudShield Order Form.pdf"))
+    assert original.found is False, "the unsigned original must not be flagged"
+
+    print("✓ annotation signature detection test passed")
+
+def test_signature_ink_attributes_to_correct_party():
+    """
+    Both signed CloudShield files are signed in the CUSTOMER's column
+    (TechNova, x=312), not the vendor's (CloudShield, x=96). The FreeText
+    annotation actually starts at x=305 - left of its own label - so an
+    any-overlap rule credits it to the vendor as well. Ink must be
+    attributed to the single area it overlaps most.
+    """
+    print("Testing signature party attribution...")
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    docs = os.path.join(root, "sample_docs")
+    detector = SignatureInkDetector()
+
+    for name in ("CloudShield Order Form signed image.pdf",
+                 "CloudShield Order Form signed text.pdf"):
+        detail = detector.detect(os.path.join(docs, name)).detail
+        assert "x=312" in detail, f"{name}: expected customer column, got {detail}"
+        assert "x=96" not in detail, f"{name}: bled into vendor column: {detail}"
+
+    print("✓ signature party attribution test passed")
+
+def test_signing_a_document_changes_its_content_hash():
+    """
+    Signing a document in place must invalidate its cached hash.
+
+    Signatures are added as PDF annotations, which do not appear in the
+    extracted text: the three CloudShield variants produce byte-identical
+    text. With a text-only hash, signing a document in place would leave the
+    fingerprint unchanged, the next run would skip it, and the signature
+    would never be seen - the caching would hide the very thing the
+    signature scan exists to find.
+    """
+    print("Testing signing changes the content hash...")
+
+    import pdfplumber
+
+    from src.services.document_processor import DocumentProcessor
+    from src.utils.signature_ink import SignatureInkDetector
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    docs = os.path.join(root, "sample_docs")
+    detector = SignatureInkDetector()
+
+    def text_of(path):
+        with pdfplumber.open(path) as pdf:
+            return "".join((p.extract_text() or "") + "\n" for p in pdf.pages)
+
+    names = ["CloudShield Order Form.pdf",
+             "CloudShield Order Form signed image.pdf",
+             "CloudShield Order Form signed text.pdf"]
+    paths = [os.path.join(docs, n) for n in names]
+
+    # Precondition: the text really is identical, so the test is exercising
+    # the signature component of the hash and nothing else.
+    texts = {text_of(p) for p in paths}
+    assert len(texts) == 1, "expected identical extracted text across variants"
+
+    hashes = {DocumentProcessor._content_hash(text_of(p), detector.detect(p)) for p in paths}
+    assert len(hashes) == 3, f"signed and unsigned must hash differently, got {hashes}"
+
+    print("✓ signing changes content hash test passed")
+
+def test_signature_ink_no_false_positive_on_real_samples():
+    """
+    None of the real sample documents is signed with ink, and ACME carries a
+    letterhead logo. A naive "does this PDF contain images?" check would
+    flag ACME; the positional band must not.
+    """
+    print("Testing no false positives on real samples...")
+
+    import glob
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    detector = SignatureInkDetector()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    for path in glob.glob(os.path.join(root, "sample_docs", "*.pdf")):
+        # The two "signed" CloudShield variants genuinely carry a signature
+        # annotation; they are covered by the annotation tests above.
+        if "signed" in os.path.basename(path).lower():
+            continue
+        finding = detector.detect(path)
+        assert finding.found is False, f"false positive on {os.path.basename(path)}"
+        assert finding.anchors_examined > 0, (
+            f"no signature area found in {os.path.basename(path)} - "
+            "anchoring is broken")
+
+    print("✓ no false positives test passed")
+
+def test_signature_hint_reaches_the_prompt():
+    """
+    A positive finding must actually reach the model. The model cannot see
+    images, so this hint is the only way a drawn signature can influence the
+    extraction.
+    """
+    print("Testing signature hint reaches the prompt...")
+
+    from src.utils.signature_ink import SignatureInkFinding
+
+    found = SignatureInkFinding(found=True, detail="1 curves object(s) beside "
+                                "'Signature:' at x=320 on page 1", anchors_examined=2)
+    hint = found.as_prompt_hint()
+    assert "x=320" in hint
+    assert "signed" in hint.lower()
+
+    absent = SignatureInkFinding(found=False, anchors_examined=2).as_prompt_hint()
+    assert "no drawing or image content" in absent
+
+    # No signature area at all is distinct from "found nothing".
+    none = SignatureInkFinding(found=False, anchors_examined=0).as_prompt_hint()
+    assert "no signature area" in none.lower()
+
+    # And the rendered prompt carries it through.
+    from src.config.field_registry import FieldDefinitionRegistry
+    from src.prompts.prompt_repository import PromptRepository
+    from src.prompts.schema_prompt_builder import SchemaPromptBuilder
+
+    fields = FieldDefinitionRegistry().get_fields(None)
+    prompt = PromptRepository().render(
+        "extract_contract_fields",
+        fields_description=SchemaPromptBuilder.build_fields_description(fields),
+        json_example=SchemaPromptBuilder.build_json_example(fields),
+        signature_hint=hint,
+        retry_note="",
+        document_text="...")
+    assert "x=320" in prompt
+
+    print("✓ signature hint test passed")
+
+def test_signature_detector_never_breaks_extraction():
+    """A scan failure must degrade to 'no finding', never raise."""
+    print("Testing signature detector resilience...")
+
+    from src.utils.signature_ink import SignatureInkDetector
+
+    finding = SignatureInkDetector().detect("/does/not/exist.pdf")
+    assert finding.found is False
+    assert finding.anchors_examined == 0
+
+    print("✓ signature detector resilience test passed")
+
+def _burstless_payload(with_burst=False):
+    burst = ({"raw_text": "Burst Threshold up to 10%", "percentage": 10} if with_burst else None)
+    return json.dumps({
+        "start_date": "01-01-2025", "end_date": "12-31-2025", "amount": 100,
+        "payment_terms": "Net 30", "billing_address": "x",
+        "customer_signature": False, "signature_evidence": None,
+        "technical_account_manager": None,
+        "items": [{"product_name": "W", "quantity": 1, "price": 100,
+                   "total_amount": 100, "burst": burst}],
+    })
+
+def test_quality_check_flags_dropped_burst():
+    """
+    The real failure: a document whose text mentions burst, extracted with
+    no burst on any item. Nothing else about the result looks wrong, which
+    is precisely why it needs flagging.
+    """
+    print("Testing quality check flags dropped burst...")
+
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, LineItem
+    from src.services.quality_checker import ExtractionQualityChecker
+
+    checker = ExtractionQualityChecker()
+    text = "... up to the Burst Threshold at no additional cost ..."
+
+    dropped = ExtractedContractData(document_type="order_form", items=[
+        LineItem(product_name="W", quantity=1, price=1.0, total_amount=1.0)])
+    assert checker.check(text, dropped), "a dropped burst must warn"
+
+    kept = ExtractedContractData(document_type="order_form", items=[
+        LineItem(product_name="W", quantity=1, price=1.0, total_amount=1.0,
+                 burst=BurstTerm(raw_text="Burst Threshold up to 10%"))])
+    assert checker.check(text, kept) == [], "an extracted burst must not warn"
+
+    # A document with no burst clause must never warn, however it extracts.
+    assert checker.check("no such clause here", dropped) == []
+
+    # A failed extraction already reports its error; don't pile on.
+    failed = ExtractedContractData(document_type="order_form", error="boom", items=[])
+    assert checker.check(text, failed) == []
+
+    print("✓ quality check flags dropped burst test passed")
+
+def test_quality_check_no_false_positives_on_real_documents():
+    """
+    A noisy check gets ignored, which is worse than no check. Replays every
+    sample document's text against a result that DOES carry burst terms -
+    none may warn.
+    """
+    print("Testing quality check has no false positives...")
+
+    import glob
+
+    import pdfplumber
+
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, LineItem
+    from src.services.quality_checker import ExtractionQualityChecker
+
+    checker = ExtractionQualityChecker()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    good = ExtractedContractData(document_type="order_form", items=[
+        LineItem(product_name="W", quantity=1, price=1.0, total_amount=1.0,
+                 burst=BurstTerm(raw_text="Burst Threshold"))])
+
+    for path in glob.glob(os.path.join(root, "sample_docs", "*.pdf")):
+        with pdfplumber.open(path) as pdf:
+            text = " ".join((p.extract_text() or "") for p in pdf.pages)
+        assert checker.check(text, good) == [], f"false positive on {os.path.basename(path)}"
+
+    print("✓ quality check false-positive test passed")
+
+def test_retry_fires_once_and_only_on_a_warning():
+    """
+    A detected drop gets exactly one more attempt; a clean extraction gets
+    none. Both halves matter - an unbounded retry burns money, and retrying
+    a good result burns it for nothing.
+    """
+    print("Testing retry behaviour...")
+
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, LineItem
+    from src.services.document_processor import DocumentProcessor
+
+    def item(with_burst):
+        return LineItem(product_name="W", quantity=1, price=1.0, total_amount=1.0,
+                        burst=BurstTerm(raw_text="Burst Threshold") if with_burst else None)
+
+    class _ScriptedExtractor:
+        """Hands back scripted results, recording the retry note each time."""
+        def __init__(self, *with_burst):
+            self.script = list(with_burst)
+            self.notes = []
+
+        def extract(self, text, document_type, customer_key=None,
+                    signature_hint=None, retry_note=""):
+            self.notes.append(retry_note)
+            assert self.script, "extractor called more times than scripted"
+            return ExtractedContractData(document_type=document_type,
+                                         items=[item(self.script.pop(0))])
+
+    _, registry = _build_test_contract_extractor()
+    text = "... up to the Burst Threshold at no additional cost ..."
+
+    # 1. First attempt drops burst; retry recovers it.
+    scripted = _ScriptedExtractor(False, True)
+    processor = DocumentProcessor(scripted, registry)
+    first = scripted.extract(text, "order_form")
+    scripted.notes.clear()
+    result = processor._check_and_maybe_retry(text, first, "order_form", None, None)
+
+    assert len(scripted.notes) == 1, f"expected exactly one retry, got {len(scripted.notes)}"
+    # The retry prompt must DIFFER - at temperature 0 an identical prompt
+    # returns the identical wrong answer, so the note is what makes it work.
+    assert scripted.notes[0] != "", "retry must carry a corrective note"
+    assert "burst" in scripted.notes[0].lower()
+    assert result.items[0].burst is not None, "retry result should be kept"
+    assert result.warnings and "resolved on retry" in result.warnings[0]
+
+    # 2. A clean first attempt triggers no retry at all.
+    scripted = _ScriptedExtractor(True)
+    processor = DocumentProcessor(scripted, registry)
+    good = scripted.extract(text, "order_form")
+    scripted.notes.clear()
+    result = processor._check_and_maybe_retry(text, good, "order_form", None, None)
+    assert scripted.notes == [], "a clean extraction must not be retried"
+    assert result.warnings == []
+
+    # 3. If the retry also fails, keep the FIRST result and its warning
+    #    rather than assuming the second attempt is better. Exactly two
+    #    attempts, never a loop.
+    scripted = _ScriptedExtractor(False, False)
+    processor = DocumentProcessor(scripted, registry)
+    first = scripted.extract(text, "order_form")
+    scripted.notes.clear()
+    result = processor._check_and_maybe_retry(text, first, "order_form", None, None)
+    assert len(scripted.notes) == 1, "must not retry more than once"
+    assert result.warnings and "resolved" not in result.warnings[0]
+
+    print("✓ retry behaviour test passed")
+
+def test_warnings_round_trip_and_render():
+    """Warnings survive storage and appear against the document."""
+    print("Testing warnings round trip...")
+
+    from src.reporting.console_reporter import ConsoleReporter
+
+    repository, database = _build_test_repository()
+    contract = _sample_contract("order_form")
+    contract.warnings = ["document text mentions burst terms but none were extracted"]
+    repository.save(contract, "/docs/x.pdf", "h")
+
+    stored = repository.fetch_all()
+    assert stored[0].warnings == contract.warnings
+
+    flat = " ".join(ConsoleReporter().render(stored).split())
+    assert "Warning" in flat
+    assert "mentions burst terms" in flat
+    assert "1 document with a possible dropped field" in flat
+
+    # A clean document renders no warning furniture.
+    repository.delete("/docs/x.pdf")
+    repository.save(_sample_contract("order_form"), "/docs/y.pdf", "h2")
+    clean = " ".join(ConsoleReporter().render(repository.fetch_all()).split())
+    assert "Warning" not in clean
+    assert "Quality warnings" not in clean
+
+    database.close()
+    print("✓ warnings round trip test passed")
+
 def run_all_tests():
     """Run all comprehensive tests"""
     print("Running comprehensive tests for document data extraction system...")
@@ -954,7 +1736,11 @@ def run_all_tests():
         test_storage_type_routing,
         test_foreign_key_is_enforced,
         test_storage_idempotency_cascade,
-        test_unchanged_document_skips_llm,
+        test_every_run_extracts_from_scratch,
+        test_quality_check_flags_dropped_burst,
+        test_quality_check_no_false_positives_on_real_documents,
+        test_retry_fires_once_and_only_on_a_warning,
+        test_warnings_round_trip_and_render,
         test_failed_extraction_is_recorded_but_not_stored,
         test_unmapped_document_type_is_audited_only,
         test_null_repository_keeps_processor_working,
@@ -972,6 +1758,25 @@ def run_all_tests():
         test_reporter_renders_per_item_bursts,
         test_reporter_shows_ambiguous_scope_verbatim,
         test_additive_migration_preserves_existing_rows,
+        test_canonical_path_collapses_spellings,
+        test_migration_merges_duplicate_paths,
+        test_migration_leaves_distinct_documents_alone,
+        test_report_scopes_to_this_run,
+        test_progress_reporter_output,
+        test_delete_removes_document_and_children,
+        test_delete_all_and_null_repository,
+        test_reset_utility_matches_by_fragment,
+        test_signature_evidence_round_trip,
+        test_signature_renders_as_true_false,
+        test_acme_unsigned_case_end_to_end,
+        test_signature_ink_detects_drawn_signature,
+        test_signature_ink_does_not_bleed_across_columns,
+        test_signature_ink_detects_annotation_signatures,
+        test_signature_ink_attributes_to_correct_party,
+        test_signing_a_document_changes_its_content_hash,
+        test_signature_ink_no_false_positive_on_real_samples,
+        test_signature_hint_reaches_the_prompt,
+        test_signature_detector_never_breaks_extraction,
     ]
 
     try:

@@ -44,6 +44,8 @@ class ContractExtractor:
         text: str,
         document_type: str,
         customer_key: Optional[str] = None,
+        signature_hint: Optional[str] = None,
+        retry_note: str = "",
     ) -> ExtractedContractData:
         """
         Extract contract fields from document text.
@@ -52,6 +54,14 @@ class ContractExtractor:
             text: Raw extracted document text.
             document_type: Document type label (e.g. "purchase_order", "order_form").
             customer_key: Matched customer profile key, if any.
+            signature_hint: What a geometric scan of the PDF saw near the
+                signature area. The extracted text carries no image or
+                drawing content, so without this a hand-signed document
+                looks identical to an unsigned one.
+            retry_note: Corrective instruction for a second attempt after a
+                quality check found a dropped field. Must change the prompt -
+                at temperature 0 an identical prompt returns the identical
+                answer.
 
         Returns:
             ExtractedContractData: The extraction result. On failure, the
@@ -63,6 +73,8 @@ class ContractExtractor:
             PROMPT_TEMPLATE_NAME,
             fields_description=SchemaPromptBuilder.build_fields_description(fields),
             json_example=SchemaPromptBuilder.build_json_example(fields),
+            signature_hint=signature_hint or "No signature area scan was performed.",
+            retry_note=retry_note,
             document_text=text,
         )
 
@@ -90,6 +102,7 @@ class ContractExtractor:
                 payment_terms=data.get("payment_terms"),
                 billing_address=data.get("billing_address"),
                 customer_signature=bool(data.get("customer_signature", False)),
+                signature_evidence=data.get("signature_evidence"),
                 items=items,
                 technical_account_manager=data.get("technical_account_manager"),
                 confidence=0.9,

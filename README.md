@@ -47,7 +47,9 @@ document_extraction/
 │   │   └── console_reporter.py  # Formats stored results for the console
 │   ├── models/                  # Pydantic data models
 │   └── utils/
-│       └── normalization.py     # Date / payment-terms normalization
+│       ├── normalization.py     # Date / payment-terms normalization
+│       ├── signature_ink.py     # Detects drawn/scanned signatures (no OCR)
+│       └── reset_documents.py   # Clear stored records
 ├── tests/                       # Test suite (no API key required)
 ├── plans/                       # Design plans for major changes
 ├── data/                        # Generated SQLite database (gitignored)
@@ -138,6 +140,62 @@ erDiagram
 
 The `burst` special term lives on the *items* tables, since it is defined per line item. `technical_account_manager` lives on the header tables.
 
+#### Customer signature
+
+`customer_signature` is `True`/`False`, and it means the customer **actually signed** — a signature is a mark, not a name field:
+
+- **`True`** only when there is a real signature indicator on or above the signature line: a written or typed signature, `/s/ Name`, an explicit `Signed`, or a checkmark beside the signature label.
+- **`False`** when the signature line is blank — **even if the Name, Title and Date beneath it are filled in.** Those fields identify who *would* sign; they accompany a signature rather than constituting one.
+
+It reads the **customer's** signature, not the vendor's. Signature blocks often have one column per party, and the customer is not always the party the filename suggests — in `ACME Order From.pdf`, ACME is the *vendor* and Appsoft Inc is the customer.
+
+`signature_evidence` records what the document actually showed, so the boolean can be checked without reopening the PDF:
+
+```
+Customer signature .......... False
+Signature evidence .......... Signature line blank for Appsoft Inc. (customer);
+                              only Name/Title/Date filled in ('Bob Lee', 'CEO',
+                              '01-02-2025')
+```
+
+##### Drawn and scanned signatures
+
+`pdfplumber.extract_text()` returns nothing for image or vector content, so a hand-signed contract would look identical to an unsigned one in the text alone — a false negative, and the dangerous direction of error for a contracts pipeline.
+
+`SignatureInkDetector` (`src/utils/signature_ink.py`) closes that gap **without OCR**. It never tries to read a signature; it only asks whether non-text ink sits where a signature belongs, and passes the answer to the model as evidence:
+
+1. **Anchor on the word** — find `/signature|signed/i` via `page.extract_words()`, which yields coordinates.
+2. **Band the area** — 55pt above to 65pt below the label, extending right across that party's column.
+3. **Check for ink** — `page.images`, `page.curves`, and **`page.annots`**. A pen stroke is a curve, a pasted image is an image, and a signature added by a PDF viewer is an annotation.
+4. **Hint the extraction** — the model weighs it alongside the text and records the reasoning in `signature_evidence`.
+
+Four design points, each forced by something found while building it:
+
+- **Annotations are the case that matters most.** PDF viewers do not write signatures into page content — they add them as annotations. macOS Preview's *Markup → Signature* writes a `/Stamp` for a drawn or scanned signature and a `/FreeText` for a typed one, and **neither appears in `page.images`, `page.curves`, or `extract_text()`**. A signed and an unsigned copy produce byte-identical text. Checking only page content misses every signature made this way.
+- **Anchor on the word, not on the signature line.** Locating the rule via `page.lines` and looking above it works on only **one of four** sample documents: ACME draws real line objects, CloudShield's rules are literal underscore *characters*, and the two purchase orders have no rule at all. Word-anchoring finds a signature area in **all four**.
+- **Ink is attributed to the single area it overlaps most.** A fixed band, or an any-overlap rule, credits one party's signature to the party beside them. The `/FreeText` signature in `CloudShield Order Form signed text.pdf` starts at `x=305` — left of its own label at `x=312` — so an any-overlap rule reports the *vendor* as signed too.
+- **Lines are deliberately ignored.** A signature rule *is* a line, so counting lines would report every blank signature line as signed.
+
+Verified against real signed documents (`sample_docs/`) and a synthetic pair (`tests/fixtures/`) whose text is identical and which differ only in a drawn curve — the isolation that makes the test meaningful:
+
+| Document | Signature scan | Result |
+|---|---|---|
+| `CloudShield Order Form signed image.pdf` | `/Stamp` annotation at x=312 (customer column) | `True` |
+| `CloudShield Order Form signed text.pdf` | `/FreeText` "TechNova fake signature" at x=312 | `True` |
+| `CloudShield Order Form.pdf` (original) | no ink | `False` |
+| `signed_order_form.pdf` (fixture) | drawing at x=320 | `True` |
+| `unsigned_order_form.pdf` (fixture) | no ink | `False` |
+
+Plus zero false positives on the unsigned real documents — ACME's letterhead logo (`top=-6..131`) sits far outside any signature band, so the naive "does this PDF contain images?" check would flag it while the positional band correctly does not.
+
+**Remaining limitations:**
+
+- The band offsets are calibrated against these documents. A company stamp, an initial, or a decorative flourish near a signature block would read as ink. The detector reports *evidence* rather than issuing a verdict — the model still weighs the surrounding text and can discount a mark it judges to be a logo — but the offsets are worth re-tuning against a wider corpus.
+- Only `Ink`, `Stamp`, `FreeText` and `Widget` annotation subtypes count. `Link` and `Popup` are excluded so navigation chrome near a signature block is not mistaken for a signature; a signature carried by some other subtype would be missed.
+- A cryptographic digital signature (a signed `/Sig` field) is *not* validated. This detects that a mark is present, not that it is authentic.
+>
+> A related limitation: two-column signature blocks are flattened by text extraction (`Signature: Signature:` on one line), so attributing a signature to the right party is inference rather than fact. Reading that block geometrically would fix both problems at once.
+
 #### Burst terms
 
 A burst term allows the customer to exceed the purchased quantity at no extra cost. It is stored structurally, in these item columns:
@@ -216,9 +274,67 @@ Optionally, pass a path to process one document (or a different folder) instead 
 python -m src.main "sample_docs/Purchase Order – BrightOps Analytics Ltd.pdf"
 ```
 
-Change the input folder via `input_folder` in `config/pipeline.yaml`, or set `INPUT_FOLDER` in the environment.
+The report is **scoped to what the run touched**, so a single-document run reports that document, not the whole database. Anything else stored is accounted for in a `Not shown` line rather than hidden.
 
-<details>
+Progress is printed as the run proceeds — document counter, page/character counts, the model being called, retries, and skips — so a long wait on an LLM call is labelled rather than a blank screen:
+
+```
+Processing 4 documents in sample_docs
+  profile: openrouter_paid · model: anthropic/claude-sonnet-5
+
+  [1/4] ACME Order From.pdf
+        text extracted (2 pages, 1,697 chars)
+        order_form · customer: acme
+        calling model ...
+        model responded in 4.2s
+        stored 5 line items
+```
+
+Paths are canonicalised before storage, so `sample_docs/x.pdf` and its absolute form are recorded as one document rather than two.
+
+### Every run starts from scratch
+
+**Stored results are output, never input.** Every run re-extracts every document; nothing in the database decides what work happens. A result is therefore always reproducible from the documents alone, and changing a prompt, model, or field definition shows up immediately — there is no cache to invalidate and no stale row to explain a surprising result.
+
+The database is read for exactly one purpose: printing the report for the run that just wrote it.
+
+The trade is cost — a six-document run always costs about 12 cents rather than sometimes being free. That is deliberate: reproducibility is worth more here than avoiding a repeat call.
+
+### Clearing stored records
+
+Since every run re-extracts, this is not needed to refresh a document. It is for clearing out records of documents that have left the input folder, or starting from an empty database:
+
+```bash
+# See what's stored
+python -m src.utils.reset_documents
+
+# Forget one (a name fragment is enough)
+python -m src.utils.reset_documents ACME
+
+# Forget everything (asks first; --yes skips the prompt)
+python -m src.utils.reset_documents --all
+```
+
+Removing a document cascades to its header and line-item rows, so nothing is orphaned.
+
+### Quality warnings
+
+Extraction can silently drop a field: the model returns well-formed JSON with a field simply absent, and nothing looks wrong — status is `extracted`, totals reconcile, and the report renders exactly as it would for a document that genuinely lacks that field. This happened in practice, with one of three byte-identical CloudShield documents losing all three of its burst thresholds.
+
+After each extraction the result is checked against the document's own text. If the text mentions a field's subject but nothing carries it, the extraction is flagged and **retried once** with a corrective note naming the missing field:
+
+```
+        calling model ...
+        model responded in 23.9s
+        quality check: document text mentions burst terms but none were
+        extracted - the model may have skipped them - retrying
+        calling model (retry) ...
+        stored 6 line items
+```
+
+The warning is kept even when the retry succeeds (marked `resolved on retry`), so a first-attempt failure stays visible rather than being quietly papered over. If the retry does no better, the first result is kept along with its warning — a second attempt is not assumed to be an improvement.
+
+Extraction runs at **temperature 0** for the same reason: extraction has one correct answer, so sampling variety is pure downside. Worth knowing that this reduces variance rather than eliminating it — provider batching and floating-point ordering still introduce some, which is why the check and retry exist rather than relying on temperature alone.<details>
 <summary>Example output</summary>
 
 ```
@@ -288,10 +404,8 @@ results = process_folder("sample_docs")
 print(results)
 ```
 
-Re-running over the same folder is safe and cheap: a document whose text is
-unchanged since the last run is skipped *before* the LLM is called, so
-re-processing a folder after adding one file costs one extraction rather
-than one per document.
+Re-running over the same folder re-extracts every document: stored results
+are output, never a cache that suppresses work.
 
 ### Processing Specific Documents
 
@@ -312,7 +426,7 @@ print(results)
 
 ### 2. Document Processor (`document_processor.py`)
 - Extracts PDF text, identifies document type and customer (both via cheap keyword matching, no extra LLM call)
-- Skips documents whose text is unchanged since the last run, before any LLM call
+- Sanity-checks each result against the document text and retries once if a field was dropped
 - Delegates field extraction to the injected `ContractExtractor` and persistence to the injected repository
 
 ### 3. Field Definition Registry (`field_registry.py`)
@@ -342,7 +456,7 @@ Formatting only - it takes already-loaded `StoredContract` objects and knows not
 
 ## Supported Document Types
 
-Both **Purchase Orders** and **Order Forms** are extracted against the same field schema: start/end date, amount, payment terms (`Net xx`), billing address, customer signature (true/false), line items (product/quantity/price/total, each with an optional structured per-item "burst" term — see [Burst terms](#burst-terms)), and technical account manager. See `plans/canonical-contract-field-schema.md` for the field-by-field rationale, including real variations observed across the sample documents in `sample_docs/`.
+Both **Purchase Orders** and **Order Forms** are extracted against the same field schema: start/end date, amount, payment terms (`Net xx`), billing address, customer signature (True/False, with the evidence for it — see [Customer signature](#customer-signature)), line items (product/quantity/price/total, each with an optional structured per-item "burst" term — see [Burst terms](#burst-terms)), and technical account manager. See `plans/canonical-contract-field-schema.md` for the field-by-field rationale, including real variations observed across the sample documents in `sample_docs/`.
 
 ## Testing
 

@@ -19,6 +19,15 @@ IN_MEMORY_PATH = ":memory:"
 # new columns have to be added explicitly or an older database silently
 # keeps the old shape and fails on INSERT. See _apply_additive_migrations.
 ADDED_COLUMNS = {
+    "processed_documents": [
+        ("warnings", "TEXT"),
+    ],
+    "sales_orders": [
+        ("signature_evidence", "TEXT"),
+    ],
+    "purchase_orders": [
+        ("signature_evidence", "TEXT"),
+    ],
     "sales_order_items": [
         ("term_months", "REAL"),
         ("price_period", "TEXT"),
@@ -95,7 +104,70 @@ class Database:
         with open(self.schema_path, "r") as f:
             self._connection.executescript(f.read())
         self._apply_additive_migrations()
+        self._canonicalize_source_paths()
         self._connection.commit()
+
+    def _canonicalize_source_paths(self) -> None:
+        """
+        Rewrite stored source paths to their canonical form, merging rows
+        that turn out to be the same document under different spellings.
+
+        Earlier versions stored whatever path the caller supplied, so one
+        document processed via a folder run (absolute path) and via a
+        command-line argument (relative path) became two rows despite the
+        UNIQUE constraint - double-counting every aggregate built on them.
+        DocumentProcessor now canonicalizes at the boundary; this repairs
+        databases written before that.
+
+        Where a canonical path collides, the most recently processed row is
+        kept: it reflects the current code, prompt, and model, so it is the
+        row a re-run would produce anyway. The rows removed are by
+        construction the same document, and their header/item rows cascade
+        away with them rather than being orphaned.
+        """
+        try:
+            rows = self._connection.execute(
+                "SELECT id, source_file, processed_at FROM processed_documents"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return  # table not created yet
+
+        # Newest first, so the first row seen for a canonical path is the
+        # one worth keeping.
+        newest_first = sorted(
+            rows, key=lambda r: (r["processed_at"] or "", r["id"]), reverse=True
+        )
+
+        keep_by_path = {}
+        superseded = []
+        for row in newest_first:
+            canonical = str(Path(row["source_file"]).resolve())
+            if canonical in keep_by_path:
+                superseded.append(row["id"])
+            else:
+                keep_by_path[canonical] = row
+
+        for row_id in superseded:
+            self._connection.execute(
+                "DELETE FROM processed_documents WHERE id = ?", (row_id,)
+            )
+
+        renamed = 0
+        for canonical, row in keep_by_path.items():
+            if row["source_file"] != canonical:
+                self._connection.execute(
+                    "UPDATE processed_documents SET source_file = ? WHERE id = ?",
+                    (canonical, row["id"]),
+                )
+                renamed += 1
+
+        # Say what happened rather than silently deleting rows - a migration
+        # that quietly removes data is one nobody can trust.
+        if superseded or renamed:
+            print(
+                f"Storage migration: canonicalized {renamed} document path(s), "
+                f"merged {len(superseded)} duplicate(s)."
+            )
 
     def _apply_additive_migrations(self) -> None:
         """
@@ -107,10 +179,8 @@ class Database:
         purely additive, which `ALTER TABLE ... ADD COLUMN` handles without
         touching stored rows.
 
-        Preserving the existing rows matters beyond convenience: dropping
-        the database would also discard the content hashes that let unchanged
-        documents skip extraction, forcing a full re-run against a
-        rate-limited free tier.
+        Preserving existing rows matters because they are the accumulated
+        output of past runs - the record of what was extracted and when.
         """
         for table, columns in ADDED_COLUMNS.items():
             existing = {

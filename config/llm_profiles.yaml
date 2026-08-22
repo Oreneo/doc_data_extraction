@@ -9,16 +9,94 @@
 # Switch profiles without touching this file by setting the LLM_PROFILE
 # environment variable, e.g. `LLM_PROFILE=local_ollama`.
 
-active_profile: openrouter_free
-
+active_profile: openrouter_paid
 profiles:
   openrouter_free:
     base_url: https://openrouter.ai/api/v1
-    model: meta-llama/llama-3.1-8b-instruct:free
+    # OpenRouter's free-tier roster rotates over time as providers add/retire
+    # slugs (this one previously pointed at meta-llama/llama-3.1-8b-instruct:free,
+    # which stopped being free as of 2026-08). If this model starts 404ing,
+    # check https://openrouter.ai/models?max_price=0 or
+    # `curl https://openrouter.ai/api/v1/models` for a current ":free" slug.
+    model: poolside/laguna-s-2.1:free
+    # model: google/gemma-4-31b-it:free
     api_key_env: OPENROUTER_API_KEY
-    temperature: 0.1
-    max_tokens: 2048
+    # 0, not 0.1: extraction has one correct answer, so sampling variety is
+    # pure downside. Note this reduces variance rather than eliminating it -
+    # provider batching and floating-point ordering still introduce some.
+    temperature: 0
+    # CloudShield truncated mid-JSON at 2048 ("Unterminated string ...
+    # char 3537"): 6 line items, each carrying a burst object whose
+    # raw_text is a long verbatim clause, does not fit. Raised with
+    # headroom for the largest document in sample_docs/.
+    max_tokens: 8192
     timeout: 60
+    # Free-tier models sit behind a shared upstream pool that 429s under
+    # load and reports how long to back off (seen: retry_after_seconds=5),
+    # so retry_delay starts above that hint rather than the default 1s.
+    # Kept to 3 attempts: with exponential backoff and a 60s timeout each,
+    # more retries mostly buy a very long wait before the same failure.
+    max_retries: 3
+    retry_delay: 6
+
+  # Paid OpenRouter models. Uses the same OPENROUTER_API_KEY as the free
+  # profile - the key works for both; paid models just draw on account
+  # credits instead of the shared free pool (so no 429s from pool
+  # contention, and no daily request cap).
+  #
+  # Activate with `LLM_PROFILE=openrouter_paid` in .env, or by changing
+  # `active_profile` at the top of this file.
+  #
+  # MODEL CHOICE - three picks for this workload, priced per million tokens
+  # (verified against OpenRouter's live model API on 2026-08-22).
+  #
+  # What this job actually needs, in priority order:
+  #   1. Instruction adherence over a nested schema with conditional rules
+  #      (the burst clause has seven, including "attach only to the items
+  #      the clause names" and "don't guess when the target is unclear").
+  #   2. Reconstructing table columns from text pdfplumber has already
+  #      flattened - CloudShield's multi-year table is the hard case.
+  #   3. Prose inference: deriving "Net 30" from "within thirty (30) days",
+  #      reading a signature block as signed/unsigned.
+  #   4. Reliable JSON. Note this is a text-in/JSON-out pipeline - OCR
+  #      benchmarks don't apply, since pdfplumber does the text extraction.
+  #
+  # Cost is a rounding error here either way: ~2K tokens in, ~2K out per
+  # document puts a 4-document run at roughly $0.10 on any of these.
+  # Pick for accuracy, not price.
+  openrouter_paid:
+    base_url: https://openrouter.ai/api/v1
+
+    # ACTIVE - best all-round fit. Strongest of the three at following a
+    # long list of conditional extraction rules and at ambiguous fields in
+    # messy business documents, which is where this pipeline actually
+    # struggles. $2/M in, $10/M out, 1M context.
+    model: anthropic/claude-sonnet-5
+
+    # ALTERNATIVE 1 - switch to this if table/column reconstruction turns
+    # out to be the bottleneck (e.g. CloudShield's interleaved per-year
+    # rows come back misaligned). Leads current document-understanding
+    # benchmarks. $2/M in, $12/M out, 1M context. Note: "preview" slug, so
+    # it may change or be retired with less notice than a stable release.
+    # model: google/gemini-3.1-pro-preview
+
+    # ALTERNATIVE 2 - the schema-enforcement pick: most reliable at
+    # emitting valid JSON matching a declared shape, if you start seeing
+    # malformed responses rather than wrong values. $2.50/M in, $15/M out,
+    # 1M context.
+    # model: openai/gpt-5.4
+
+    api_key_env: OPENROUTER_API_KEY
+    # 0, not 0.1: extraction has one correct answer, so sampling variety is
+    # pure downside. Note this reduces variance rather than eliminating it -
+    # provider batching and floating-point ordering still introduce some.
+    temperature: 0
+    # Same reasoning as the free profile: CloudShield's six line items,
+    # each with a verbatim burst clause, overflow a smaller budget.
+    max_tokens: 8192
+    timeout: 60
+    # Paid models don't sit behind the shared free pool, so there's no
+    # upstream 429 to wait out - back off only for genuine transient errors.
     max_retries: 3
     retry_delay: 1
 
@@ -26,7 +104,10 @@ profiles:
     base_url: http://localhost:11434/v1
     model: llama3.1
     api_key_env: null
-    temperature: 0.1
+    # 0, not 0.1: extraction has one correct answer, so sampling variety is
+    # pure downside. Note this reduces variance rather than eliminating it -
+    # provider batching and floating-point ordering still introduce some.
+    temperature: 0
     max_tokens: 2048
     timeout: 120
     max_retries: 2

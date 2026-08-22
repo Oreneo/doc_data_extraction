@@ -34,8 +34,15 @@ Rules for burst:
 6. Only when a clause genuinely covers the whole order, with no product or period qualifier, should the identical burst object appear on every item.
 7. If the document doesn't mention burst terms at all, set burst to null on every item.
 
+SIGNATURE AREA SCAN
+
+The document text below is extracted text only - it contains no images or drawings. A separate geometric scan of the PDF reports:
+
+$signature_hint
+
 Document text:
 $document_text
 
+$retry_note
 Respond with ONLY valid JSON, no extra commentary. If a field cannot be found, set it to null (false for customer_signature, an empty list for items). Use exactly this shape:
 $json_example

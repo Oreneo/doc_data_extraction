@@ -20,6 +20,7 @@ from src.config.storage_config import load_storage_config
 from src.extractors.contract_extractor import ContractExtractor
 from src.prompts.prompt_repository import PromptRepository
 from src.reporting.console_reporter import ConsoleReporter
+from src.reporting.progress_reporter import ConsoleProgressReporter
 from src.services.document_processor import DocumentProcessor
 from src.services.llm_service import LLMService
 from src.storage.contract_repository import SqliteContractRepository
@@ -34,9 +35,10 @@ def _build_pipeline():
     dependencies.
 
     Returns:
-        tuple: (DocumentProcessor, SqliteContractRepository, StorageConfig).
-            The repository is handed back because the report reads from it
-            after processing finishes.
+        tuple: (DocumentProcessor, SqliteContractRepository, StorageConfig,
+            LLMProfile). The repository is handed back because the report
+            reads from it after processing finishes; the LLM profile so the
+            run can announce which model it's using.
     """
     llm_config = load_llm_config()
     storage_config = load_storage_config()
@@ -49,15 +51,17 @@ def _build_pipeline():
     database = Database(storage_config.database_path)
     repository = SqliteContractRepository(database)
 
-    processor = DocumentProcessor(contract_extractor, field_registry, repository)
-    return processor, repository, storage_config
+    processor = DocumentProcessor(
+        contract_extractor, field_registry, repository, ConsoleProgressReporter()
+    )
+    return processor, repository, storage_config, llm_config
 
 
 def _build_document_processor() -> DocumentProcessor:
     """
     Build just the document processor, for the library API below.
     """
-    processor, _, _ = _build_pipeline()
+    processor, _, _, _ = _build_pipeline()
     return processor
 
 
@@ -67,9 +71,9 @@ def run(target: Optional[str] = None) -> int:
     report of everything in the database.
 
     The report is read back out of SQLite rather than from the results held
-    in memory, so it reflects what was actually stored - and a re-run where
-    every document is unchanged still prints the full report without
-    calling the LLM at all.
+    in memory, so it reflects what was actually stored. Reading is the only
+    thing the database is used for here: every run extracts every document
+    from scratch, so stored results never decide what work happens.
 
     Args:
         target: Optional single document or folder to process instead of
@@ -80,19 +84,32 @@ def run(target: Optional[str] = None) -> int:
         int: Process exit code - 0 on success, 1 if the run failed.
     """
     try:
-        processor, repository, storage_config = _build_pipeline()
+        processor, repository, storage_config, llm_config = _build_pipeline()
 
         if target is None:
             target = load_pipeline_config().input_folder
 
         if os.path.isdir(target):
-            print(f"Processing documents in {target} ...\n")
-            processor.process_folder(target)
+            file_count = len(processor.list_documents(target))
+            processor.progress.run_started(
+                target, file_count, llm_config.name, llm_config.model
+            )
+            results = processor.process_folder(target)
+            touched = set(results)
         else:
-            print(f"Processing {target} ...\n")
-            processor.process_file(target)
+            processor.progress.run_started(
+                target, 1, llm_config.name, llm_config.model
+            )
+            processor.progress.document_started(1, 1, target)
+            result = processor.process_file(target)
+            processor.progress.run_finished()
+            touched = {result["source_file"]}
 
-        ConsoleReporter().report(repository.fetch_all(), storage_config.database_path)
+        # Scope the report to what this run actually touched. Everything else
+        # in the database is still accounted for, as a "not shown" line.
+        ConsoleReporter().report(
+            repository.fetch_all(), storage_config.database_path, only_paths=touched
+        )
         return 0
 
     except Exception as e:

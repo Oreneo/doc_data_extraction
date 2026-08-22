@@ -80,10 +80,18 @@ class ExtractedContractData(BaseModel):
     payment_terms: Optional[str] = None
     billing_address: Optional[str] = None
     customer_signature: bool = False
+    # What the document actually shows in the signature area. Kept alongside
+    # the boolean so a wrong reading is visible in the report rather than
+    # silent - the same reason BurstTerm keeps raw_text.
+    signature_evidence: Optional[str] = None
     items: List[LineItem] = []
     technical_account_manager: Optional[str] = None
     confidence: float = 0.0
     error: Optional[str] = None
+    # Sanity-check findings from ExtractionQualityChecker - fields the model
+    # appears to have silently dropped. A warning flags a result for a human;
+    # it does not make the result invalid, so the data is still stored.
+    warnings: List[str] = []
     raw_response: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 

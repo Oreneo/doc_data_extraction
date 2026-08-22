@@ -2,7 +2,7 @@
 Read model for contract data loaded back out of the database.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -25,4 +25,5 @@ class StoredContract(BaseModel):
     processed_at: str
     status: str                                     # extracted | failed | skipped_type
     error: Optional[str] = None
+    warnings: List[str] = []
     data: Optional[ExtractedContractData] = None

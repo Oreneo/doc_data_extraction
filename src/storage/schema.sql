@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS processed_documents (
     error         TEXT,
     confidence    REAL,
     raw_response  TEXT,               -- unparsed LLM text, kept for audit/debugging
+    warnings      TEXT,               -- newline-joined quality warnings, if any
     processed_at  TEXT    NOT NULL    -- ISO 8601 UTC
 );
 
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sales_orders (
     payment_terms             TEXT,     -- "Net xx"
     billing_address           TEXT,
     customer_signature        INTEGER NOT NULL DEFAULT 0,   -- SQLite has no BOOLEAN; 0/1
+    signature_evidence        TEXT,     -- what the signature area actually showed
     technical_account_manager TEXT
 );
 
@@ -92,6 +94,7 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     payment_terms             TEXT,
     billing_address           TEXT,
     customer_signature        INTEGER NOT NULL DEFAULT 0,
+    signature_evidence        TEXT,
     technical_account_manager TEXT
 );
 

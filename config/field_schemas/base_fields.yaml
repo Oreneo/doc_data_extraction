@@ -56,12 +56,37 @@ fields:
 
   - name: customer_signature
     description: >
-      Whether the customer/buyer has signed. True if there is a signature
-      indicator - an explicit "Signed" mark or checkmark, or a filled-in
-      name/title/date under a signature block. False if the signature area
-      is blank/unfilled or there is no signature section at all.
+      Whether the CUSTOMER/BUYER has actually signed. A signature is a MARK,
+      not a name field.
+
+      Set true ONLY when there is a real signature indicator on or above the
+      signature line: a written or typed signature, "/s/ Name", an explicit
+      "Signed", or a checkmark beside the signature label.
+
+      Set false when the signature line itself is blank - EVEN IF the Name,
+      Title and Date fields beneath it are filled in. Those fields identify
+      who would sign and accompany a signature; they are not a signature.
+      Also set false when the document has no signature section at all.
+
+      Read the customer/buyer's signature, not the vendor's or seller's.
+      Signature blocks often have two columns, one per party. Work out which
+      party is the customer by cross-referencing the "Bill To" / "To:" /
+      customer billing name elsewhere in the document, and read only that
+      party's column. If the two columns cannot be told apart, say so in
+      signature_evidence rather than guessing.
     field_type: bool
     required: true
+
+  - name: signature_evidence
+    description: >
+      A short phrase recording what the document actually shows in the
+      signature area, so the true/false above can be checked without
+      reopening the PDF. Quote the indicator when there is one.
+
+      Examples: "'✔ Signed' beside Buyer Signature"; "signature line blank,
+      Name/Title/Date filled in"; "no signature section present".
+    field_type: string
+    required: false
 
   - name: technical_account_manager
     description: >

@@ -27,7 +27,7 @@ STATUS_EXTRACTED = "extracted"
 STATUS_FAILED = "failed"
 # Recognized and processed, but this document type has no header/items
 # tables of its own (e.g. invoice/generic). The audit row is still written
-# so the file counts as seen and won't be re-extracted on the next run.
+# so the run's report can account for the file.
 STATUS_SKIPPED_TYPE = "skipped_type"
 
 
@@ -35,20 +35,6 @@ class AbstractContractRepository(ABC):
     """
     Interface for persisting extraction results.
     """
-
-    @abstractmethod
-    def is_unchanged(self, source_file: str, content_hash: str) -> bool:
-        """
-        Whether this file has already been processed with identical content.
-
-        Args:
-            source_file: Path of the source document.
-            content_hash: Hash of the document's extracted text.
-
-        Returns:
-            bool: True if a stored record matches, meaning extraction can be
-                skipped entirely.
-        """
 
     @abstractmethod
     def save(
@@ -81,6 +67,31 @@ class AbstractContractRepository(ABC):
                 type and ordered by source file.
         """
 
+    @abstractmethod
+    def delete(self, source_file: str) -> bool:
+        """
+        Remove a stored document and everything beneath it.
+
+        Every run re-extracts every document, so this is not needed to force
+        a refresh - it is for clearing out records of documents that have
+        left the input folder.
+
+        Args:
+            source_file: Canonical path of the document to remove.
+
+        Returns:
+            bool: True if a row was removed, False if none matched.
+        """
+
+    @abstractmethod
+    def delete_all(self) -> int:
+        """
+        Remove every stored document.
+
+        Returns:
+            int: How many documents were removed.
+        """
+
 
 class NullContractRepository(AbstractContractRepository):
     """
@@ -88,9 +99,6 @@ class NullContractRepository(AbstractContractRepository):
     without `if repository is not None` checks scattered through
     DocumentProcessor).
     """
-
-    def is_unchanged(self, source_file: str, content_hash: str) -> bool:
-        return False
 
     def save(
         self,
@@ -102,6 +110,12 @@ class NullContractRepository(AbstractContractRepository):
 
     def fetch_all(self) -> List[StoredContract]:
         return []
+
+    def delete(self, source_file: str) -> bool:
+        return False
+
+    def delete_all(self) -> int:
+        return 0
 
 
 class SqliteContractRepository(AbstractContractRepository):
@@ -117,20 +131,6 @@ class SqliteContractRepository(AbstractContractRepository):
             database: Connection/schema owner to write through.
         """
         self.database = database
-
-    def is_unchanged(self, source_file: str, content_hash: str) -> bool:
-        row = self.database.connection.execute(
-            "SELECT content_hash, status FROM processed_documents WHERE source_file = ?",
-            (source_file,),
-        ).fetchone()
-
-        # A previously failed document is retried even when unchanged - the
-        # failure may have been a transient API error rather than anything
-        # about the document itself.
-        if row is None or row["status"] == STATUS_FAILED:
-            return False
-
-        return row["content_hash"] == content_hash
 
     def save(
         self,
@@ -176,6 +176,24 @@ class SqliteContractRepository(AbstractContractRepository):
 
         return [self._load_stored_contract(row) for row in document_rows]
 
+    def delete(self, source_file: str) -> bool:
+        """
+        Remove one document. Its header and line-item rows go with it via
+        ON DELETE CASCADE (which requires PRAGMA foreign_keys = ON - see
+        Database), so no manual cleanup of child tables is needed.
+        """
+        with self.database.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM processed_documents WHERE source_file = ?", (source_file,)
+            )
+            return cursor.rowcount > 0
+
+    def delete_all(self) -> int:
+        """Remove every document, cascading to headers and line items."""
+        with self.database.transaction() as conn:
+            cursor = conn.execute("DELETE FROM processed_documents")
+            return cursor.rowcount
+
     def _load_stored_contract(self, document_row) -> StoredContract:
         stored = StoredContract(
             source_file=document_row["source_file"],
@@ -183,6 +201,7 @@ class SqliteContractRepository(AbstractContractRepository):
             processed_at=document_row["processed_at"],
             status=document_row["status"],
             error=document_row["error"],
+            warnings=(document_row["warnings"] or "").splitlines(),
         )
 
         tables = TABLES_BY_DOCUMENT_TYPE.get(document_row["document_type"])
@@ -216,6 +235,7 @@ class SqliteContractRepository(AbstractContractRepository):
             payment_terms=header["payment_terms"],
             billing_address=header["billing_address"],
             customer_signature=bool(header["customer_signature"]),
+            signature_evidence=header["signature_evidence"],
             technical_account_manager=header["technical_account_manager"],
             confidence=document_row["confidence"] or 0.0,
             items=[self._load_line_item(item) for item in item_rows],
@@ -268,8 +288,8 @@ class SqliteContractRepository(AbstractContractRepository):
             """
             INSERT INTO processed_documents (
                 source_file, content_hash, document_type, customer_key,
-                status, error, confidence, raw_response, processed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, error, confidence, raw_response, warnings, processed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_file,
@@ -280,6 +300,7 @@ class SqliteContractRepository(AbstractContractRepository):
                 result.error,
                 result.confidence,
                 result.raw_response,
+                "\n".join(result.warnings) if result.warnings else None,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -303,8 +324,8 @@ class SqliteContractRepository(AbstractContractRepository):
             INSERT INTO {header_table} (
                 document_id, customer_key, start_date, end_date, amount,
                 payment_terms, billing_address, customer_signature,
-                technical_account_manager
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signature_evidence, technical_account_manager
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 document_id,
@@ -315,6 +336,7 @@ class SqliteContractRepository(AbstractContractRepository):
                 result.payment_terms,
                 result.billing_address,
                 int(result.customer_signature),
+                result.signature_evidence,
                 result.technical_account_manager,
             ),
         )

@@ -37,7 +37,8 @@ FIELD_LABELS = [
     ("payment_terms", "Payment terms"),
     ("billing_address", "Billing address"),
     ("customer_signature", "Customer signature"),
-    ("technical_account_manager", "Technical acct manager"),
+    ("signature_evidence", "Signature evidence"),
+    ("technical_account_manager", "Technical account manager"),
 ]
 
 # Width of the dotted leader column, wide enough for the longest label plus
@@ -66,7 +67,12 @@ class ConsoleReporter:
         """
         self.width = width
 
-    def report(self, contracts: List[StoredContract], database_path: Optional[str] = None) -> str:
+    def report(
+        self,
+        contracts: List[StoredContract],
+        database_path: Optional[str] = None,
+        only_paths: Optional[set] = None,
+    ) -> str:
         """
         Render the full report and print it.
 
@@ -74,25 +80,42 @@ class ConsoleReporter:
             contracts: Records to render, as returned by the repository.
             database_path: Shown in the summary so it's obvious where the
                 data was read from.
+            only_paths: Restrict the report to these source paths (what the
+                current run touched). None renders everything stored.
 
         Returns:
             str: The rendered report, also written to stdout.
         """
-        output = self.render(contracts, database_path)
+        output = self.render(contracts, database_path, only_paths)
         print(output)
         return output
 
-    def render(self, contracts: List[StoredContract], database_path: Optional[str] = None) -> str:
+    def render(
+        self,
+        contracts: List[StoredContract],
+        database_path: Optional[str] = None,
+        only_paths: Optional[set] = None,
+    ) -> str:
         """
         Render the full report without printing it (useful for tests).
 
         Args:
             contracts: Records to render.
             database_path: Shown in the summary.
+            only_paths: Restrict the report to these source paths. Documents
+                filtered out are still counted in a "not shown" line, so the
+                report scopes to this run without pretending the rest of the
+                database doesn't exist.
 
         Returns:
             str: The rendered report.
         """
+        hidden = []
+        if only_paths is not None:
+            shown = [c for c in contracts if c.source_file in only_paths]
+            hidden = [c for c in contracts if c.source_file not in only_paths]
+            contracts = shown
+
         if not contracts:
             return "\n".join([
                 self._heavy_rule(),
@@ -120,7 +143,7 @@ class ConsoleReporter:
             for contract in group:
                 lines.extend(self._render_contract(contract))
 
-        lines.extend(self._render_summary(contracts, database_path))
+        lines.extend(self._render_summary(contracts, database_path, hidden))
         return "\n".join(lines)
 
     # -- document rendering -------------------------------------------------
@@ -147,6 +170,13 @@ class ConsoleReporter:
             )
 
         lines.extend(self._render_items(data))
+
+        # Surfaced against the document itself, not just tallied in the
+        # summary: a dropped field is invisible in the extracted values by
+        # definition, so the warning is the only thing that shows it.
+        for warning in contract.warnings:
+            lines.extend(self._field_lines("⚠ Warning", warning))
+
         return lines
 
     def _render_items(self, data: ExtractedContractData) -> List[str]:
@@ -274,6 +304,7 @@ class ConsoleReporter:
         self,
         contracts: List[StoredContract],
         database_path: Optional[str],
+        hidden: Optional[List[StoredContract]] = None,
     ) -> List[str]:
         extracted = [c for c in contracts if c.data is not None]
         failed = [c for c in contracts if c.status == "failed"]
@@ -305,6 +336,13 @@ class ConsoleReporter:
             *self._field_lines("Line items", str(item_count), indent="  "),
         ]
 
+        flagged = [c for c in contracts if c.warnings]
+        if flagged:
+            lines.extend(self._field_lines(
+                "Quality warnings",
+                f"{self._count(len(flagged), 'document')} with a possible dropped field",
+                indent="  "))
+
         if extracted:
             mark = "✓" if reconciled == len(extracted) else "✗"
             lines.extend(
@@ -324,6 +362,23 @@ class ConsoleReporter:
         if database_path:
             lines.append("")
             lines.extend(self._field_lines("Database", database_path, indent="  "))
+
+        # Account for documents the database holds but this run didn't touch,
+        # so scoping the report doesn't hide that they exist.
+        if hidden:
+            hidden_extracted = sum(1 for c in hidden if c.data is not None)
+            hidden_failed = sum(1 for c in hidden if c.status == "failed")
+            detail = []
+            if hidden_extracted:
+                detail.append(f"{hidden_extracted} extracted")
+            if hidden_failed:
+                detail.append(f"{hidden_failed} failed")
+            suffix = f" ({', '.join(detail)})" if detail else ""
+            lines.extend(self._field_lines(
+                "Not shown",
+                f"{self._count(len(hidden), 'other document')} stored{suffix}",
+                indent="  ",
+            ))
 
         lines.append("")
         return lines
@@ -384,7 +439,9 @@ class ConsoleReporter:
 
     def _format_value(self, attribute: str, value) -> str:
         if attribute == "customer_signature":
-            return "Yes" if value else "No"
+            # The assignment specifies this field as True/False, so render it
+            # that way rather than as Yes/No.
+            return "True" if value else "False"
         if value is None or value == "":
             return EMPTY
         if attribute == "amount":
