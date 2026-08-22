@@ -136,7 +136,29 @@ erDiagram
 | `sales_orders` / `sales_order_items` | Order Forms ("SOs" in the diagram) and their line items. |
 | `purchase_orders` / `purchase_order_items` | Purchase Orders ("POs") and their line items. |
 
-The `burst` special term lives on the *items* tables, since it is defined per line item. `technical_account_manager` lives on the header tables. Dates are stored as ISO 8601 (`2025-03-01`) so that SQL ordering matches chronological ordering; the assignment's `mm-dd-yyyy` format is preserved on the extraction output itself.
+The `burst` special term lives on the *items* tables, since it is defined per line item. `technical_account_manager` lives on the header tables.
+
+#### Burst terms
+
+A burst term allows the customer to exceed the purchased quantity at no extra cost. It is stored structurally, in these item columns:
+
+| Column | Meaning |
+|---|---|
+| `burst_raw_text` | The clause verbatim. **Always populated** when a burst exists. |
+| `burst_percentage` | e.g. `38.89` |
+| `burst_basis` | What the percentage is of, in the document's words |
+| `burst_cap_units` | Absolute ceiling, if the clause sets one |
+| `burst_period` | e.g. `per contract year` |
+| `burst_applies_to` | The product or usage it may be applied to |
+
+Two deliberate properties:
+
+- **`burst_raw_text` is always kept**, so if structured parsing fails the clause itself is never lost. The structured columns are strictly additive.
+- **No allowance is computed.** Only one of the sample documents (CloudShield) states the quantity its percentage applies to. Multiplying a percentage by a line item's `quantity` elsewhere would invent a figure the contract never states — ACME's quantity column reads `1` (one subscription, not one billable unit), so `5% × 1` is meaningless. The percentage and cap are recorded as written; the arithmetic belongs to whoever holds the usage data.
+
+Burst is attached only to the line items a clause actually covers, so it is normal for some rows to have none. Where a clause names usage that doesn't map cleanly onto one product line, `burst_applies_to` keeps the document's own wording so an unresolved scope stays visible rather than being silently decided.
+
+The items tables also carry `term_months` and `price_period`, which explain totals that aren't simply `price × quantity` — CloudShield prices per unit per *month* across a 12-month term, so 180,000 × $3.25 is $585,000 while the stated total is $7,020,000. `total_amount` is always the document's figure and is never recomputed. Dates are stored as ISO 8601 (`2025-03-01`) so that SQL ordering matches chronological ordering; the assignment's `mm-dd-yyyy` format is preserved on the extraction output itself.
 
 The full DDL is in `src/storage/schema.sql`, applied automatically on startup.
 
@@ -320,7 +342,7 @@ Formatting only - it takes already-loaded `StoredContract` objects and knows not
 
 ## Supported Document Types
 
-Both **Purchase Orders** and **Order Forms** are extracted against the same field schema: start/end date, amount, payment terms (`Net xx`), billing address, customer signature (true/false), line items (product/quantity/price/total, each with an optional per-item "burst" term), and technical account manager. See `plans/canonical-contract-field-schema.md` for the field-by-field rationale, including real variations observed across the sample documents in `sample_docs/`.
+Both **Purchase Orders** and **Order Forms** are extracted against the same field schema: start/end date, amount, payment terms (`Net xx`), billing address, customer signature (true/false), line items (product/quantity/price/total, each with an optional structured per-item "burst" term — see [Burst terms](#burst-terms)), and technical account manager. See `plans/canonical-contract-field-schema.md` for the field-by-field rationale, including real variations observed across the sample documents in `sample_docs/`.
 
 ## Testing
 

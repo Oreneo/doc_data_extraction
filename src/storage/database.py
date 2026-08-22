@@ -14,6 +14,33 @@ DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 IN_MEMORY_PATH = ":memory:"
 
+# Columns added to existing tables after the initial schema shipped.
+# `CREATE TABLE IF NOT EXISTS` leaves an already-created table untouched, so
+# new columns have to be added explicitly or an older database silently
+# keeps the old shape and fails on INSERT. See _apply_additive_migrations.
+ADDED_COLUMNS = {
+    "sales_order_items": [
+        ("term_months", "REAL"),
+        ("price_period", "TEXT"),
+        ("burst_raw_text", "TEXT"),
+        ("burst_percentage", "REAL"),
+        ("burst_basis", "TEXT"),
+        ("burst_cap_units", "REAL"),
+        ("burst_period", "TEXT"),
+        ("burst_applies_to", "TEXT"),
+    ],
+    "purchase_order_items": [
+        ("term_months", "REAL"),
+        ("price_period", "TEXT"),
+        ("burst_raw_text", "TEXT"),
+        ("burst_percentage", "REAL"),
+        ("burst_basis", "TEXT"),
+        ("burst_cap_units", "REAL"),
+        ("burst_period", "TEXT"),
+        ("burst_applies_to", "TEXT"),
+    ],
+}
+
 
 class Database:
     """
@@ -67,7 +94,37 @@ class Database:
         this is safe to run against an existing database."""
         with open(self.schema_path, "r") as f:
             self._connection.executescript(f.read())
+        self._apply_additive_migrations()
         self._connection.commit()
+
+    def _apply_additive_migrations(self) -> None:
+        """
+        Add any columns missing from an existing database.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already
+        exists, so a database created by an earlier version keeps its old
+        columns and fails on INSERT. Every schema change so far has been
+        purely additive, which `ALTER TABLE ... ADD COLUMN` handles without
+        touching stored rows.
+
+        Preserving the existing rows matters beyond convenience: dropping
+        the database would also discard the content hashes that let unchanged
+        documents skip extraction, forcing a full re-run against a
+        rate-limited free tier.
+        """
+        for table, columns in ADDED_COLUMNS.items():
+            existing = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            if not existing:
+                continue  # table doesn't exist yet; schema.sql just created it
+
+            for column, column_type in columns:
+                if column not in existing:
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

@@ -7,8 +7,32 @@ In addition to the fields above, extract a list of line items under the key "ite
 - product_name (string)
 - quantity (number)
 - price (unit price, number)
-- total_amount (number)
-- burst (string or null): a "burst" special term for this item (may be labeled "Burst (Item Level)", "Burst Threshold", or similar), describing extra usage allowed at no additional cost. If the document states one burst clause that applies to the whole order rather than to a specific product, copy that same text into the burst field of every item in the list. If the document doesn't mention burst terms at all, set burst to null on every item.
+- total_amount (number): the total for this line, exactly as stated in the document. Do not recalculate it.
+- term_months (number or null): the term this line covers in months, if the document states one (e.g. an "Order Term (Months)" column).
+- price_period (string or null): "monthly" if the price shown is per unit per month, "one_time" if it is the full price for the line. Null if unclear.
+- burst (object or null): see below.
+
+BURST TERMS
+
+A "burst" term (may be labeled "Burst (Item Level)", "Burst Threshold", or similar) allows the customer to exceed the purchased quantity at no additional cost. When the document contains one, express it as an object:
+
+    {
+        "raw_text": "<the clause, copied verbatim>",
+        "percentage": <number or null>,
+        "basis": "<what the percentage is of, e.g. 'Billable Units for SaaS subscription'>",
+        "cap_units": <number or null>,
+        "period": "<e.g. 'per contract year', 'per consecutive 24 months'>",
+        "applies_to": "<the product or usage it may be applied to, in the document's own words>"
+    }
+
+Rules for burst:
+1. "raw_text" is required whenever a burst exists. Copy the sentence(s) exactly. If you cannot confidently determine any other field, set it to null - but never omit raw_text.
+2. Do NOT calculate anything. Report the percentage and the cap exactly as written. Never multiply the percentage by a quantity.
+3. WHICH ITEMS GET IT: a burst clause usually names the product or usage it covers (e.g. "in connection with SaaS subscription", "licensed analytics usage"). Attach the burst object ONLY to the line items matching that product. Leave burst null on items the clause does not cover - for example a support or services line when the clause names only the platform.
+4. DIFFERENT THRESHOLDS PER PERIOD: if the clause states different percentages for different periods (e.g. "during Year 1, up to 38.89%, during Year 2, up to 28.21%"), attach each percentage to the line item covering that period. Do not copy the same percentage to every item.
+5. IF THE TARGET IS UNCLEAR: when the clause names usage that doesn't clearly correspond to one product line, attach the burst to every line item it could plausibly cover, and set "applies_to" to the document's own wording. Do not guess a single line.
+6. Only when a clause genuinely covers the whole order, with no product or period qualifier, should the identical burst object appear on every item.
+7. If the document doesn't mention burst terms at all, set burst to null on every item.
 
 Document text:
 $document_text

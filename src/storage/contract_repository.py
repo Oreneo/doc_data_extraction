@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from ..models.extracted_data import ExtractedContractData, LineItem
+from ..models.extracted_data import BurstTerm, ExtractedContractData, LineItem
 from ..models.stored_contract import StoredContract
 from ..utils.normalization import to_iso_date
 from .database import Database
@@ -218,18 +218,37 @@ class SqliteContractRepository(AbstractContractRepository):
             customer_signature=bool(header["customer_signature"]),
             technical_account_manager=header["technical_account_manager"],
             confidence=document_row["confidence"] or 0.0,
-            items=[
-                LineItem(
-                    product_name=item["product_name"],
-                    quantity=item["quantity"],
-                    price=item["price"],
-                    total_amount=item["total_amount"],
-                    burst=item["burst"],
-                )
-                for item in item_rows
-            ],
+            items=[self._load_line_item(item) for item in item_rows],
         )
         return stored
+
+    @staticmethod
+    def _load_line_item(row) -> LineItem:
+        # burst_raw_text is populated for every stored burst, so its absence
+        # is what distinguishes "no burst term" from "burst with no
+        # structured fields parsed".
+        burst = (
+            BurstTerm(
+                raw_text=row["burst_raw_text"],
+                percentage=row["burst_percentage"],
+                basis=row["burst_basis"],
+                cap_units=row["burst_cap_units"],
+                period=row["burst_period"],
+                applies_to=row["burst_applies_to"],
+            )
+            if row["burst_raw_text"]
+            else None
+        )
+
+        return LineItem(
+            product_name=row["product_name"],
+            quantity=row["quantity"],
+            price=row["price"],
+            total_amount=row["total_amount"],
+            term_months=row["term_months"],
+            price_period=row["price_period"],
+            burst=burst,
+        )
 
     def _status_for(self, result: ExtractedContractData) -> str:
         if result.error is not None:
@@ -305,8 +324,10 @@ class SqliteContractRepository(AbstractContractRepository):
             f"""
             INSERT INTO {items_table} (
                 {foreign_key}, line_number, product_name, quantity, price,
-                total_amount, burst
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                total_amount, term_months, price_period,
+                burst_raw_text, burst_percentage, burst_basis,
+                burst_cap_units, burst_period, burst_applies_to
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -316,7 +337,14 @@ class SqliteContractRepository(AbstractContractRepository):
                     item.quantity,
                     item.price,
                     item.total_amount,
-                    item.burst,
+                    item.term_months,
+                    item.price_period,
+                    item.burst.raw_text if item.burst else None,
+                    item.burst.percentage if item.burst else None,
+                    item.burst.basis if item.burst else None,
+                    item.burst.cap_units if item.burst else None,
+                    item.burst.period if item.burst else None,
+                    item.burst.applies_to if item.burst else None,
                 )
                 for line_number, item in enumerate(result.items, start=1)
             ],

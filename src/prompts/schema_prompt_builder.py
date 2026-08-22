@@ -24,7 +24,16 @@ _ITEMS_JSON_BLOCK = """    "items": [
             "quantity": 0.0,
             "price": 0.0,
             "total_amount": 0.0,
-            "burst": "<string or null>"
+            "term_months": "<number or null>",
+            "price_period": "<monthly | one_time | null>",
+            "burst": {
+                "raw_text": "<the clause, verbatim>",
+                "percentage": "<number or null>",
+                "basis": "<string or null>",
+                "cap_units": "<number or null>",
+                "period": "<string or null>",
+                "applies_to": "<string or null>"
+            }
         }
     ]"""
 

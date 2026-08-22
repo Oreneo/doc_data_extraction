@@ -59,8 +59,19 @@ CREATE TABLE IF NOT EXISTS sales_order_items (
     product_name   TEXT    NOT NULL,
     quantity       REAL,
     price          REAL,
-    total_amount   REAL,
-    burst          TEXT                -- per-item special term
+    total_amount   REAL,               -- as stated in the document; never recomputed
+    term_months    REAL,               -- explains totals that aren't price x quantity
+    price_period   TEXT,               -- 'monthly' | 'one_time'
+    -- Burst special term, flattened: it is 0-or-1 per line item, so a
+    -- separate table would add a join for no extra expressiveness.
+    -- burst_raw_text is populated whenever a burst exists; the structured
+    -- columns are a best-effort reading of that same clause.
+    burst_raw_text   TEXT,
+    burst_percentage REAL,
+    burst_basis      TEXT,
+    burst_cap_units  REAL,
+    burst_period     TEXT,
+    burst_applies_to TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sales_order_items_parent
@@ -93,7 +104,14 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
     quantity          REAL,
     price             REAL,
     total_amount      REAL,
-    burst             TEXT
+    term_months       REAL,
+    price_period      TEXT,
+    burst_raw_text    TEXT,
+    burst_percentage  REAL,
+    burst_basis       TEXT,
+    burst_cap_units   REAL,
+    burst_period      TEXT,
+    burst_applies_to  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_purchase_order_items_parent

@@ -161,6 +161,8 @@ class ConsoleReporter:
             + f"{'Qty':>{COL_QUANTITY}}{'Price':>{COL_PRICE}}{'Total':>{COL_TOTAL}}",
         ]
 
+        uniform_burst = self._uniform_burst(data)
+
         for line_number, item in enumerate(data.items, start=1):
             lines.append(
                 " " * ITEM_INDENT
@@ -170,6 +172,11 @@ class ConsoleReporter:
                 + f"{self._format_money(item.price):>{COL_PRICE}}"
                 + f"{self._format_money(item.total_amount):>{COL_TOTAL}}"
             )
+            # When one clause covers the whole order it's printed once below
+            # the table instead, to avoid repeating the same sentence on
+            # every row.
+            if item.burst and not uniform_burst:
+                lines.extend(self._burst_detail_lines(item.burst))
 
         # Align the rule and the total under the Total column, using the same
         # column widths as the rows above.
@@ -187,30 +194,79 @@ class ConsoleReporter:
         lines.extend(self._render_burst(data))
         return lines
 
-    def _render_burst(self, data: ExtractedContractData) -> List[str]:
+    def _uniform_burst(self, data: ExtractedContractData):
         """
-        Burst is stored per line item, but a document usually states one
-        clause covering the whole order, which is then replicated onto every
-        item. Printing that identical sentence once per row would bury the
-        rest of the output, so a uniform value collapses to a single line.
+        The single burst term shared by every line item, or None if the
+        items differ (including any item having no burst at all).
+
+        A clause covering the whole order gets replicated onto every item,
+        and repeating the same sentence on each row would bury the rest of
+        the output - so that case is collapsed to one entry below the table.
+        Anything else is genuinely per-item and is printed per row.
         """
         bursts = [item.burst for item in data.items]
+        if not bursts or not all(bursts):
+            return None
 
-        if not any(bursts):
+        first = bursts[0]
+        return first if all(b == first for b in bursts) else None
+
+    def _render_burst(self, data: ExtractedContractData) -> List[str]:
+        """Burst summary printed below the line-item table."""
+        if not any(item.burst for item in data.items):
             return ["", *self._field_lines("Burst", EMPTY)]
 
-        if len(set(bursts)) == 1:
-            return ["", *self._field_lines("Burst (all items)", bursts[0])]
+        uniform = self._uniform_burst(data)
+        if uniform is not None:
+            # Same headline/attribute shape as the per-item rendering, so the
+            # two paths present a burst identically.
+            indent = " " * (4 + LABEL_WIDTH + 1)
+            return ["", *self._field_lines("Burst (all items)", self._burst_headline(uniform)),
+                    *self._burst_attribute_lines(uniform, indent=indent)]
 
-        lines = ["", "    Burst (per item)"]
-        for line_number, burst in enumerate(bursts, start=1):
-            lines.extend(
-                self._wrapped(
-                    burst or EMPTY,
-                    prefix=" " * ITEM_INDENT + f"{line_number:<{COL_NUMBER}}",
-                )
-            )
+        # Per-item bursts were already printed inline against their rows.
+        covered = sum(1 for item in data.items if item.burst)
+        return ["", *self._field_lines(
+            "Burst", f"per item - {covered} of {len(data.items)} line items (shown above)"
+        )]
+
+    def _burst_detail_lines(self, burst) -> List[str]:
+        """The burst block printed under its line item's row."""
+        prefix = " " * (ITEM_INDENT + COL_NUMBER)
+        headline = self._burst_headline(burst)
+        lines = self._wrapped(headline, prefix=prefix + "Burst: ")
+        lines.extend(self._burst_attribute_lines(burst, indent=prefix + "       "))
         return lines
+
+    def _burst_headline(self, burst) -> str:
+        """`38.89% of <basis>`, degrading to the raw clause when nothing was parsed."""
+        if burst.percentage is None:
+            return burst.raw_text
+        headline = f"{self._format_percentage(burst.percentage)}"
+        if burst.basis:
+            headline += f" of {burst.basis}"
+        return headline
+
+    def _burst_attribute_lines(self, burst, indent: str) -> List[str]:
+        """
+        Cap / period / applies-to, joined on one line. Only fields that are
+        present are shown, so a sparsely-parsed burst degrades to nothing
+        rather than a row of placeholders.
+
+        `applies_to` is deliberately the document's own wording rather than a
+        product name we inferred: where a clause names usage that doesn't map
+        cleanly onto one line item (NovaFleet's "monitored workloads"), the
+        reader needs to see the original phrase to judge the mapping.
+        """
+        parts = []
+        if burst.cap_units is not None:
+            parts.append(f"cap {self._format_quantity(burst.cap_units)}")
+        if burst.period:
+            parts.append(burst.period)
+        if burst.applies_to:
+            parts.append(f"applies to {burst.applies_to}")
+
+        return self._wrapped(" · ".join(parts), prefix=indent) if parts else []
 
     # -- summary ------------------------------------------------------------
 
@@ -342,12 +398,17 @@ class ConsoleReporter:
         return EMPTY if value is None else f"{value:,.2f}"
 
     @staticmethod
+    def _format_percentage(value: float) -> str:
+        return f"{value:g}%"
+
+    @staticmethod
     def _format_quantity(value: Optional[float]) -> str:
         if value is None:
             return EMPTY
         # Quantities are floats on the model but almost always whole numbers;
-        # print 2 rather than 2.0 unless there's a real fraction.
-        return str(int(value)) if float(value).is_integer() else f"{value:g}"
+        # print 2 rather than 2.0 unless there's a real fraction. Grouped,
+        # since unit counts reach the hundreds of thousands.
+        return f"{int(value):,}" if float(value).is_integer() else f"{value:,g}"
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:

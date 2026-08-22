@@ -21,7 +21,7 @@ def test_system_structure():
     from src import DocumentProcessor, LLMService
     from src.extractors.contract_extractor import ContractExtractor
     from src.config.field_registry import FieldDefinitionRegistry
-    from src.models.extracted_data import ExtractedContractData, ExtractedData, LineItem
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, ExtractedData, LineItem
 
     print("✓ System structure test passed")
 
@@ -70,7 +70,7 @@ def test_model_structure():
     """Test that data models work correctly"""
     print("Testing model structure...")
 
-    from src.models.extracted_data import ExtractedContractData, ExtractedData, LineItem
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, ExtractedData, LineItem
 
     data = ExtractedData(
         document_type="test",
@@ -89,12 +89,13 @@ def test_model_structure():
         end_date="3/1/2025",
         payment_terms="within thirty (30) days from invoice",
         customer_signature=True,
-        items=[LineItem(product_name="Widget", quantity=1, price=10.0, total_amount=10.0, burst="10% burst")],
+        items=[LineItem(product_name="Widget", quantity=1, price=10.0, total_amount=10.0,
+                        burst=BurstTerm(raw_text="10% burst"))],
     )
     assert contract_data.start_date == "01-01-2025", contract_data.start_date
     assert contract_data.end_date == "03-01-2025", contract_data.end_date
     assert contract_data.payment_terms == "Net 30", contract_data.payment_terms
-    assert contract_data.items[0].burst == "10% burst"
+    assert contract_data.items[0].burst.raw_text == "10% burst"
 
     print("✓ Model structure test passed")
 
@@ -185,7 +186,13 @@ def test_contract_extractor_end_to_end():
                 "quantity": 1,
                 "price": 72000,
                 "total_amount": 72000,
-                "burst": "Buyer may exceed licensed analytics usage by up to 10% per contract year at no additional cost.",
+                "burst": {
+                    "raw_text": "Buyer may exceed licensed analytics usage by up to 10% per contract year at no additional cost.",
+                    "percentage": 10,
+                    "basis": "licensed analytics usage",
+                    "period": "per contract year",
+                    "applies_to": "licensed analytics usage",
+                },
             }
         ],
     })
@@ -205,6 +212,8 @@ def test_contract_extractor_end_to_end():
     assert len(result.items) == 1
     assert result.items[0].product_name == "Analytics Platform - Enterprise"
     assert result.items[0].burst is not None
+    assert result.items[0].burst.percentage == 10
+    assert result.items[0].burst.basis == "licensed analytics usage"
 
     print("✓ Contract extractor end-to-end test passed")
 
@@ -245,7 +254,7 @@ def _build_test_repository():
     return SqliteContractRepository(database), database
 
 def _sample_contract(document_type="order_form", **overrides):
-    from src.models.extracted_data import ExtractedContractData, LineItem
+    from src.models.extracted_data import BurstTerm, ExtractedContractData, LineItem
 
     fields = dict(
         document_type=document_type,
@@ -260,9 +269,11 @@ def _sample_contract(document_type="order_form", **overrides):
         confidence=0.9,
         items=[
             LineItem(product_name="Platform - Enterprise", quantity=1, price=72000.0,
-                     total_amount=72000.0, burst="10% burst allowance"),
+                     total_amount=72000.0, burst=BurstTerm(raw_text="10% burst allowance",
+                     percentage=10, basis="licensed units")),
             LineItem(product_name="Support - Premium", quantity=2, price=45000.0,
-                     total_amount=90000.0, burst="10% burst allowance"),
+                     total_amount=90000.0, burst=BurstTerm(raw_text="10% burst allowance",
+                     percentage=10, basis="licensed units")),
         ],
     )
     fields.update(overrides)
@@ -292,7 +303,8 @@ def test_storage_round_trip():
     assert items[0]["line_number"] == 1
     assert items[0]["product_name"] == "Platform - Enterprise"
     assert items[1]["product_name"] == "Support - Premium"
-    assert items[0]["burst"] == "10% burst allowance"
+    assert items[0]["burst_raw_text"] == "10% burst allowance"
+    assert items[0]["burst_percentage"] == 10
 
     database.close()
     print("✓ Storage round trip test passed")
@@ -516,7 +528,8 @@ def test_fetch_all_round_trip():
     assert len(data.items) == 2
     assert data.items[0].product_name == "Platform - Enterprise"
     assert data.items[1].product_name == "Support - Premium"
-    assert data.items[0].burst == "10% burst allowance"
+    assert data.items[0].burst.raw_text == "10% burst allowance"
+    assert data.items[0].burst.percentage == 10
 
     database.close()
     print("✓ fetch_all round trip test passed")
@@ -610,18 +623,24 @@ def test_console_reporter_collapses_uniform_burst():
     """
     print("Testing console reporter burst collapsing...")
 
-    from src.models.extracted_data import LineItem
+    from src.models.extracted_data import BurstTerm, LineItem
     from src.reporting.console_reporter import ConsoleReporter
 
-    uniform = ConsoleReporter().render([_reporter_fixture()])
+    # Every item carries the identical term, so it collapses to one entry
+    # rather than repeating on each row.
+    uniform = " ".join(ConsoleReporter().render([_reporter_fixture()]).split())
     assert "Burst (all items)" in uniform
-    assert uniform.count("10% burst allowance") == 1, "uniform burst should print once"
+    assert uniform.count("10% of licensed units") == 1, "uniform burst should print once"
 
-    mixed = ConsoleReporter().render([_reporter_fixture(items=[
-        LineItem(product_name="A", quantity=1, price=1.0, total_amount=1.0, burst="first burst"),
-        LineItem(product_name="B", quantity=1, price=1.0, total_amount=1.0, burst="second burst"),
-    ])])
-    assert "Burst (per item)" in mixed
+    # Differing terms are printed against their own rows instead.
+    mixed = " ".join(ConsoleReporter().render([_reporter_fixture(items=[
+        LineItem(product_name="A", quantity=1, price=1.0, total_amount=1.0,
+                 burst=BurstTerm(raw_text="first burst")),
+        LineItem(product_name="B", quantity=1, price=1.0, total_amount=1.0,
+                 burst=BurstTerm(raw_text="second burst")),
+    ])]).split())
+    assert "Burst (all items)" not in mixed
+    assert "2 of 2 line items" in mixed
     assert "first burst" in mixed and "second burst" in mixed
 
     print("✓ console reporter burst collapsing test passed")
@@ -633,7 +652,7 @@ def test_console_reporter_reconciliation():
     """
     print("Testing console reporter reconciliation...")
 
-    from src.models.extracted_data import LineItem
+    from src.models.extracted_data import BurstTerm, LineItem
     from src.reporting.console_reporter import ConsoleReporter
 
     # Sample contract: amount 162000, items 72000 + 90000 = 162000.
@@ -654,7 +673,7 @@ def test_console_reporter_fits_width():
     """
     print("Testing console reporter line width...")
 
-    from src.models.extracted_data import LineItem
+    from src.models.extracted_data import BurstTerm, LineItem
     from src.reporting.console_reporter import ConsoleReporter
 
     long_text = (
@@ -665,7 +684,7 @@ def test_console_reporter_fits_width():
         billing_address=long_text,
         technical_account_manager=long_text,
         items=[LineItem(product_name=long_text, quantity=1, price=1.0,
-                        total_amount=1.0, burst=long_text)],
+                        total_amount=1.0, burst=BurstTerm(raw_text=long_text, basis=long_text))],
     )
 
     output = ConsoleReporter(width=78).render([contract], "data/extractions.db")
@@ -673,6 +692,251 @@ def test_console_reporter_fits_width():
     assert not too_long, f"lines exceed width: {too_long[:2]}"
 
     print("✓ console reporter line width test passed")
+
+# --------------------------------------------------------------------------
+# Structured burst term tests
+# --------------------------------------------------------------------------
+
+def _cloudshield_burst(percentage):
+    from src.models.extracted_data import BurstTerm
+    return BurstTerm(
+        raw_text="During each consecutive 12 months ... up to the Burst Threshold ...",
+        percentage=percentage,
+        basis="CloudShield Enterprise Billable Units",
+        cap_units=280000,
+        period="per subscription year",
+        applies_to="CloudShield Sensor",
+    )
+
+def _cloudshield_items():
+    """Three Enterprise rows with different bursts, three Support rows with none."""
+    from src.models.extracted_data import LineItem
+    return [
+        LineItem(product_name="CloudShield Enterprise", quantity=180000, price=3.25,
+                 total_amount=7020000, term_months=12, price_period="monthly",
+                 burst=_cloudshield_burst(38.89)),
+        LineItem(product_name="Premium Support", quantity=1, price=22916.67,
+                 total_amount=275000, term_months=12, price_period="monthly"),
+        LineItem(product_name="CloudShield Enterprise", quantity=195000, price=3.25,
+                 total_amount=7605000, term_months=12, price_period="monthly",
+                 burst=_cloudshield_burst(28.21)),
+        LineItem(product_name="Premium Support", quantity=1, price=22916.67,
+                 total_amount=275000, term_months=12, price_period="monthly"),
+        LineItem(product_name="CloudShield Enterprise", quantity=210000, price=3.25,
+                 total_amount=8190000, term_months=12, price_period="monthly",
+                 burst=_cloudshield_burst(19.05)),
+        LineItem(product_name="Premium Support", quantity=1, price=22916.67,
+                 total_amount=275000, term_months=12, price_period="monthly"),
+    ]
+
+def test_structured_burst_round_trip():
+    """
+    Every structured burst sub-field survives save -> fetch_all, and items
+    without a burst come back with none - the per-item scoping the old
+    string field couldn't express.
+    """
+    print("Testing structured burst round trip...")
+
+    repository, database = _build_test_repository()
+    repository.save(
+        _sample_contract("order_form", amount=23640000.0, items=_cloudshield_items()),
+        "/docs/cloudshield.pdf", "h-cs",
+    )
+
+    items = repository.fetch_all()[0].data.items
+    assert len(items) == 6
+
+    enterprise = [i for i in items if i.product_name == "CloudShield Enterprise"]
+    support = [i for i in items if i.product_name == "Premium Support"]
+
+    # Three DIFFERENT percentages, in document order - the case the old
+    # "copy the same text to every item" behaviour flattened.
+    assert [i.burst.percentage for i in enterprise] == [38.89, 28.21, 19.05]
+    # Support lines carry no burst entitlement at all.
+    assert all(i.burst is None for i in support)
+
+    first = enterprise[0].burst
+    assert first.basis == "CloudShield Enterprise Billable Units"
+    assert first.cap_units == 280000
+    assert first.period == "per subscription year"
+    assert first.applies_to == "CloudShield Sensor"
+    assert first.raw_text.startswith("During each consecutive 12 months")
+
+    # Term/price basis explain why price x quantity != total_amount here.
+    assert enterprise[0].term_months == 12
+    assert enterprise[0].price_period == "monthly"
+    assert enterprise[0].total_amount == 7020000
+
+    database.close()
+    print("✓ structured burst round trip test passed")
+
+def test_burst_raw_text_only_is_non_regressive():
+    """
+    A burst whose structured parsing found nothing still round-trips its
+    clause and renders it. This is the guarantee that the structured fields
+    are strictly additive: worst case we have exactly the old behaviour.
+    """
+    print("Testing raw-text-only burst...")
+
+    from src.models.extracted_data import BurstTerm, LineItem
+    from src.reporting.console_reporter import ConsoleReporter
+
+    clause = "Customer may utilize up to 5% more Billable Units at no additional cost."
+    repository, database = _build_test_repository()
+    repository.save(
+        _sample_contract("order_form", amount=50000.0, items=[
+            LineItem(product_name="SaaS Subscription", quantity=1, price=50000.0,
+                     total_amount=50000.0, burst=BurstTerm(raw_text=clause)),
+        ]),
+        "/docs/acme.pdf", "h-acme",
+    )
+
+    stored = repository.fetch_all()
+    burst = stored[0].data.items[0].burst
+    assert burst is not None
+    assert burst.raw_text == clause
+    assert burst.percentage is None and burst.basis is None and burst.cap_units is None
+
+    # And it still reaches the report rather than being dropped for lacking
+    # structure.
+    assert clause[:40] in " ".join(ConsoleReporter().render(stored).split())
+
+    database.close()
+    print("✓ raw-text-only burst test passed")
+
+def test_reporter_renders_per_item_bursts():
+    """Differing per-item bursts render against their own rows, not collapsed."""
+    print("Testing per-item burst rendering...")
+
+    from src.models.stored_contract import StoredContract
+    from src.reporting.console_reporter import ConsoleReporter
+
+    stored = StoredContract(
+        source_file="/docs/cloudshield.pdf", document_type="order_form",
+        processed_at="2026-08-22T09:00:00Z", status="extracted",
+        data=_sample_contract("order_form", amount=23640000.0, items=_cloudshield_items()),
+    )
+    # Collapse whitespace: values wrap across lines at the report margin, so
+    # asserting on raw output would be asserting on line-break positions.
+    output = " ".join(ConsoleReporter().render([stored]).split())
+
+    for percentage in ("38.89%", "28.21%", "19.05%"):
+        assert percentage in output, percentage
+    assert "cap 280,000" in output
+    assert "applies to CloudShield Sensor" in output
+    # Scope is legible: 3 of 6 lines carry a burst.
+    assert "3 of 6 line items" in output
+
+    print("✓ per-item burst rendering test passed")
+
+def test_reporter_shows_ambiguous_scope_verbatim():
+    """
+    Where a clause names usage that doesn't map onto one product line
+    (NovaFleet's "monitored workloads"), the document's own wording is shown
+    rather than a product name we inferred - so an unresolved scope stays
+    visible to the reader instead of being silently decided.
+    """
+    print("Testing ambiguous burst scope visibility...")
+
+    from src.models.extracted_data import BurstTerm, LineItem
+    from src.models.stored_contract import StoredContract
+    from src.reporting.console_reporter import ConsoleReporter
+
+    vague = BurstTerm(
+        raw_text="Up to 15% additional monitored workloads allowed annually without charge.",
+        percentage=15, basis="monitored workloads", period="annually",
+        applies_to="monitored workloads",
+    )
+    items = [
+        LineItem(product_name="Cloud Security Suite", quantity=1, price=120000.0,
+                 total_amount=120000.0, burst=vague),
+        LineItem(product_name="Advanced Threat Monitoring", quantity=3, price=18000.0,
+                 total_amount=54000.0, burst=vague),
+    ]
+    stored = StoredContract(
+        source_file="/docs/novafleet.pdf", document_type="purchase_order",
+        processed_at="2026-08-22T09:00:00Z", status="extracted",
+        data=_sample_contract("purchase_order", amount=174000.0, items=items),
+    )
+
+    output = " ".join(ConsoleReporter().render([stored]).split())
+    assert "15% of monitored workloads" in output
+    # The document's phrase, not a product name we picked for it.
+    assert "applies to monitored workloads" in output
+    assert "applies to Advanced Threat Monitoring" not in output
+
+    print("✓ ambiguous burst scope test passed")
+
+def test_additive_migration_preserves_existing_rows():
+    """
+    Opening a database created before the burst columns existed adds them
+    without dropping data. This protects the stored content hashes: a
+    destructive rebuild would force a full re-extraction against a
+    rate-limited free tier.
+    """
+    print("Testing additive schema migration...")
+
+    import sqlite3
+    import tempfile
+
+    from src.storage.database import Database
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "old.db")
+
+        # A database on the OLD schema: items table with a plain `burst` TEXT
+        # column and none of the new ones.
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE processed_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, source_file TEXT NOT NULL UNIQUE,
+                content_hash TEXT NOT NULL, document_type TEXT NOT NULL, customer_key TEXT,
+                status TEXT NOT NULL, error TEXT, confidence REAL, raw_response TEXT,
+                processed_at TEXT NOT NULL);
+            CREATE TABLE sales_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL UNIQUE
+                REFERENCES processed_documents (id) ON DELETE CASCADE, customer_key TEXT,
+                start_date TEXT, end_date TEXT, amount REAL, payment_terms TEXT,
+                billing_address TEXT, customer_signature INTEGER NOT NULL DEFAULT 0,
+                technical_account_manager TEXT);
+            CREATE TABLE sales_order_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, sales_order_id INTEGER NOT NULL
+                REFERENCES sales_orders (id) ON DELETE CASCADE, line_number INTEGER NOT NULL,
+                product_name TEXT NOT NULL, quantity REAL, price REAL, total_amount REAL,
+                burst TEXT);
+        """)
+        old.execute("""INSERT INTO processed_documents
+            (source_file, content_hash, document_type, status, processed_at)
+            VALUES ('/docs/old.pdf', 'preserve-me', 'order_form', 'extracted', '2025-01-01')""")
+        old.execute("""INSERT INTO sales_orders (document_id, amount) VALUES (1, 100.0)""")
+        old.execute("""INSERT INTO sales_order_items
+            (sales_order_id, line_number, product_name, quantity, price, total_amount, burst)
+            VALUES (1, 1, 'Legacy Widget', 2, 50.0, 100.0, 'legacy burst text')""")
+        old.commit()
+        old.close()
+
+        database = Database(path)
+
+        columns = {r["name"] for r in
+                   database.connection.execute("PRAGMA table_info(sales_order_items)")}
+        for expected in ("burst_raw_text", "burst_percentage", "burst_cap_units",
+                         "term_months", "price_period"):
+            assert expected in columns, f"{expected} not added: {sorted(columns)}"
+
+        # The pre-existing row survived, hash intact.
+        row = database.connection.execute(
+            "SELECT content_hash FROM processed_documents").fetchone()
+        assert row["content_hash"] == "preserve-me"
+
+        item = database.connection.execute(
+            "SELECT * FROM sales_order_items").fetchone()
+        assert item["product_name"] == "Legacy Widget"
+        assert item["burst_raw_text"] is None     # new column, no value yet
+        assert item["burst"] == "legacy burst text"   # old column left intact
+
+        database.close()
+
+    print("✓ additive schema migration test passed")
 
 def run_all_tests():
     """Run all comprehensive tests"""
@@ -703,6 +967,11 @@ def run_all_tests():
         test_console_reporter_collapses_uniform_burst,
         test_console_reporter_reconciliation,
         test_console_reporter_fits_width,
+        test_structured_burst_round_trip,
+        test_burst_raw_text_only_is_non_regressive,
+        test_reporter_renders_per_item_bursts,
+        test_reporter_shows_ambiguous_scope_verbatim,
+        test_additive_migration_preserves_existing_rows,
     ]
 
     try:

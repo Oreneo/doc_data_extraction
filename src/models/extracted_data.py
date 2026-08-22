@@ -23,6 +23,30 @@ class FieldDefinition(BaseModel):
     format_hint: Optional[str] = None
 
 
+class BurstTerm(BaseModel):
+    """
+    A "burst" special term: an allowance to exceed the purchased quantity at
+    no additional cost.
+
+    `raw_text` is always populated; every other field is a best-effort
+    structured reading of that same sentence. That ordering is deliberate -
+    if structured parsing fails entirely, the clause itself is still
+    captured, so this is never worse than storing the sentence alone.
+
+    Deliberately does NOT carry a computed allowance. Only one of the sample
+    documents (CloudShield) states the quantity its percentage applies to;
+    for the rest, multiplying the percentage by the line item's `quantity`
+    would invent a number the contract never states.
+    """
+    raw_text: str
+    percentage: Optional[float] = None    # 38.89 for "up to 38.89%"
+    basis: Optional[str] = None           # what the percentage is of
+    cap_units: Optional[float] = None     # absolute ceiling, if the clause sets one
+    period: Optional[str] = None          # "per consecutive 24 months"
+    applies_to: Optional[str] = None      # product/usage it is redeemable against,
+                                          # in the document's own words
+
+
 class LineItem(BaseModel):
     """
     A single line item within a document's items list.
@@ -31,10 +55,16 @@ class LineItem(BaseModel):
     quantity: float
     price: float
     total_amount: float
-    # Per-item burst term. When a document states one burst clause for the
-    # whole order rather than a specific product, the same text is expected
-    # to be replicated onto every item (see extract_contract_fields.txt).
-    burst: Optional[str] = None
+    # Term and price basis, where the document states them. These exist to
+    # explain totals that aren't simply price x quantity: CloudShield prices
+    # per unit per *month* over a 12-month term, so 180,000 x $3.25 is
+    # $585,000 while the stated total is $7,020,000. total_amount remains
+    # authoritative and is never recomputed from these.
+    term_months: Optional[float] = None
+    price_period: Optional[str] = None     # "monthly" | "one_time"
+    # Per-item burst term, attached only to the items the clause actually
+    # covers (see extract_contract_fields.txt).
+    burst: Optional[BurstTerm] = None
 
 
 class ExtractedContractData(BaseModel):
