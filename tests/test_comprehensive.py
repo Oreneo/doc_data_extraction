@@ -1396,8 +1396,10 @@ def test_signature_ink_detects_annotation_signatures():
     typed = detector.detect(os.path.join(docs, "CloudShield Order Form signed text.pdf"))
     assert typed.found is True, "a /FreeText signature annotation must be detected"
     assert "FreeText" in typed.detail
-    # The annotation's text is quoted, giving the model something concrete.
-    assert "TechNova fake signature" in typed.detail
+    # The annotation's text is quoted, giving the model something concrete to
+    # weigh. Asserting on the quoting, not the name - the fixture's signature
+    # text is the user's to change.
+    assert "'" in typed.detail, f"annotation content should be quoted: {typed.detail}"
 
     # The unmodified original must stay unsigned - the three files differ
     # only in the annotation, so this is what proves the signal is real.
@@ -1691,6 +1693,37 @@ def test_retry_fires_once_and_only_on_a_warning():
 
     print("✓ retry behaviour test passed")
 
+def test_burst_headline_degrades_when_basis_is_missing():
+    """
+    A percentage alone says nothing useful - "15%" of what? The model does
+    not reliably fill `basis` (NovaFleet's "monitored workloads" landed in
+    `applies_to` on one run and `basis` on another), so a missing basis must
+    fall back to the clause rather than rendering a bare number.
+    """
+    print("Testing burst headline fallback...")
+
+    from src.models.extracted_data import BurstTerm
+    from src.reporting.console_reporter import ConsoleReporter
+
+    reporter = ConsoleReporter()
+    clause = "Burst (Item Level): Up to 15% additional monitored workloads allowed annually."
+
+    # Best case: percentage + basis.
+    full = reporter._burst_headline(
+        BurstTerm(raw_text=clause, percentage=15, basis="monitored workloads"))
+    assert full == "15% of monitored workloads"
+
+    # Basis missing - must not stop at the number.
+    partial = reporter._burst_headline(BurstTerm(raw_text=clause, percentage=15))
+    assert partial != "15%", "a bare percentage is uninformative"
+    assert "15%" in partial and "monitored workloads" in partial
+
+    # Nothing parsed at all - the clause itself.
+    bare = reporter._burst_headline(BurstTerm(raw_text=clause))
+    assert bare == clause
+
+    print("✓ burst headline fallback test passed")
+
 def test_warnings_round_trip_and_render():
     """Warnings survive storage and appear against the document."""
     print("Testing warnings round trip...")
@@ -1740,6 +1773,7 @@ def run_all_tests():
         test_quality_check_flags_dropped_burst,
         test_quality_check_no_false_positives_on_real_documents,
         test_retry_fires_once_and_only_on_a_warning,
+        test_burst_headline_degrades_when_basis_is_missing,
         test_warnings_round_trip_and_render,
         test_failed_extraction_is_recorded_but_not_stored,
         test_unmapped_document_type_is_audited_only,

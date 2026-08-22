@@ -21,3 +21,4 @@ venv/
 .claude/
 plans/
 curls/
+output.txt

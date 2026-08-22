@@ -269,12 +269,25 @@ class ConsoleReporter:
         return lines
 
     def _burst_headline(self, burst) -> str:
-        """`38.89% of <basis>`, degrading to the raw clause when nothing was parsed."""
+        """
+        `38.89% of <basis>`, degrading to the clause itself as parsing gets
+        thinner.
+
+        A percentage on its own says nothing useful - "15%" of what? The
+        model does not always fill `basis` (NovaFleet's "monitored
+        workloads" landed in `applies_to` on one run and `basis` on
+        another), so when it is missing the raw clause is shown instead of
+        a bare number. `raw_text` is always populated, so this always has
+        something to fall back on.
+        """
         if burst.percentage is None:
             return burst.raw_text
-        headline = f"{self._format_percentage(burst.percentage)}"
+
+        headline = self._format_percentage(burst.percentage)
         if burst.basis:
-            headline += f" of {burst.basis}"
+            return f"{headline} of {burst.basis}"
+        if burst.raw_text:
+            return f"{headline} — {burst.raw_text}"
         return headline
 
     def _burst_attribute_lines(self, burst, indent: str) -> List[str]:
