@@ -1,0 +1,353 @@
+# Ground truth: the correct extraction for every sample document.
+#
+# Captured from a run whose values were verified by hand against the
+# source PDFs, then committed. Regenerate with
+# scripts/export_ground_truth.py only after re-verifying.
+#
+# How each field is compared (see tests/test_accuracy.py):
+#   exact     - document_type, customer_key, dates, amount,
+#               payment_terms, customer_signature, item_count,
+#               quantity, price, total_amount, burst_percentage,
+#               burst_cap_units
+#   contains  - billing_address, product_name (the model varies
+#               punctuation and appends period qualifiers)
+#   presence  - signature_evidence, technical_account_manager
+#               (free text; reworded every run, all correct)
+#   ambiguous - skipped entirely; the document does not determine it
+#
+# Only exact/contains fields count toward the accuracy denominator.
+
+ACME Order From.pdf:
+  amount: 152500.0
+  billing_address: 123 Main Street, New York, NY, USA
+  burst_item_count: 2
+  customer_key: acme
+  customer_signature: false
+  document_type: order_form
+  end_date: '2026-12-31'
+  item_count: 5
+  items:
+  - burst_cap_units: null
+    burst_percentage: 5.0
+    price: 50000.0
+    product_name: SaaS Subscription
+    quantity: 1.0
+    total_amount: 50000.0
+  - burst_cap_units: null
+    burst_percentage: 5.0
+    price: 60000.0
+    product_name: SaaS Subscription
+    quantity: 1.0
+    total_amount: 60000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 250.0
+    product_name: Premium Support
+    quantity: 100.0
+    total_amount: 25000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 250.0
+    product_name: Premium Support
+    quantity: 50.0
+    total_amount: 12500.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 100.0
+    product_name: Training Package
+    quantity: 50.0
+    total_amount: 5000.0
+  payment_terms: Net 30
+  signature_evidence: present
+  start_date: '2025-01-01'
+  technical_account_manager: present
+CloudShield Order Form signed image.pdf:
+  amount: 23640000.0
+  billing_address: 2500 Tech Park Boulevard, Austin, Texas 78701
+  burst_item_count: 3
+  customer_key: cloudshield
+  customer_signature: true
+  document_type: order_form
+  end_date: '2028-02-28'
+  item_count: 6
+  items:
+  - burst_cap_units: 280000.0
+    burst_percentage: 38.89
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 180000.0
+    total_amount: 7020000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 28.21
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 195000.0
+    total_amount: 7605000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 19.05
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 210000.0
+    total_amount: 8190000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  payment_terms: Net 45
+  signature_evidence: present
+  start_date: '2025-03-01'
+  technical_account_manager: absent
+CloudShield Order Form signed text.pdf:
+  amount: 23640000.0
+  billing_address: 2500 Tech Park Boulevard, Austin, Texas 78701
+  burst_item_count: 3
+  customer_key: cloudshield
+  customer_signature: true
+  document_type: order_form
+  end_date: '2028-02-28'
+  item_count: 6
+  items:
+  - burst_cap_units: 280000.0
+    burst_percentage: 38.89
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 180000.0
+    total_amount: 7020000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 28.21
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 195000.0
+    total_amount: 7605000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 19.05
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 210000.0
+    total_amount: 8190000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  payment_terms: Net 45
+  signature_evidence: present
+  start_date: '2025-03-01'
+  technical_account_manager: absent
+CloudShield Order Form.pdf:
+  amount: 23640000.0
+  billing_address: 2500 Tech Park Boulevard, Austin, Texas 78701
+  burst_item_count: 3
+  customer_key: cloudshield
+  customer_signature: false
+  document_type: order_form
+  end_date: '2028-02-28'
+  item_count: 6
+  items:
+  - burst_cap_units: 280000.0
+    burst_percentage: 38.89
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 180000.0
+    total_amount: 7020000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 28.21
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 195000.0
+    total_amount: 7605000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  - burst_cap_units: 280000.0
+    burst_percentage: 19.05
+    price: 3.25
+    product_name: CloudShield Enterprise
+    quantity: 210000.0
+    total_amount: 8190000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 22916.67
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 275000.0
+  payment_terms: Net 45
+  signature_evidence: present
+  start_date: '2025-03-01'
+  technical_account_manager: absent
+Purchase Order – BrightOps Analytics Ltd variant 2.pdf:
+  amount: 121000.0
+  billing_address: 42 King George Street, London, UK
+  burst_item_count: 2
+  customer_key: brightops
+  customer_signature: true
+  document_type: purchase_order
+  end_date: '2027-06-30'
+  item_count: 3
+  items:
+  - burst_cap_units: null
+    burst_percentage: 12.0
+    price: 54000.0
+    product_name: Analytics Platform - Growth
+    quantity: 1.0
+    total_amount: 54000.0
+  - burst_cap_units: null
+    burst_percentage: 12.0
+    price: 58000.0
+    product_name: Analytics Platform - Growth
+    quantity: 1.0
+    total_amount: 58000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 9000.0
+    product_name: Onboarding Services
+    quantity: 1.0
+    total_amount: 9000.0
+  payment_terms: Net 60
+  signature_evidence: present
+  start_date: '2025-07-01'
+  technical_account_manager: present
+Purchase Order – BrightOps Analytics Ltd.pdf:
+  amount: 162000.0
+  billing_address: 42 King George Street, London, UK
+  burst_item_count: 2
+  customer_key: brightops
+  customer_signature: true
+  document_type: purchase_order
+  end_date: '2027-02-28'
+  item_count: 4
+  items:
+  - burst_cap_units: null
+    burst_percentage: 10.0
+    price: 72000.0
+    product_name: Analytics Platform – Enterprise
+    quantity: 1.0
+    total_amount: 72000.0
+  - burst_cap_units: null
+    burst_percentage: 10.0
+    price: 78000.0
+    product_name: Analytics Platform – Enterprise
+    quantity: 1.0
+    total_amount: 78000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 6000.0
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 6000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 6000.0
+    product_name: Premium Support
+    quantity: 1.0
+    total_amount: 6000.0
+  payment_terms: Net 30
+  signature_evidence: present
+  start_date: '2025-03-01'
+  technical_account_manager: present
+Purchase Order – NovaFleet Technologies Inc variant 2.pdf:
+  amount: 310000.0
+  billing_address: 900 Enterprise Drive, Toronto, ON M5G 2C3, Canada
+  burst_item_count: ambiguous
+  customer_key: novafleet
+  customer_signature: false
+  document_type: purchase_order
+  end_date: '2027-03-31'
+  item_count: 3
+  items:
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 128000.0
+    product_name: Cloud Security Suite
+    quantity: 1.0
+    total_amount: 128000.0
+  - burst_cap_units: null
+    burst_percentage: null
+    price: 140000.0
+    product_name: Cloud Security Suite
+    quantity: 1.0
+    total_amount: 140000.0
+  - burst_cap_units: null
+    burst_percentage: 15.0
+    price: 21000.0
+    product_name: Advanced Threat Monitoring
+    quantity: 2.0
+    total_amount: 42000.0
+  payment_terms: Net 45
+  signature_evidence: present
+  start_date: '2025-04-01'
+  technical_account_manager: absent
+Purchase Order – NovaFleet Technologies Inc.pdf:
+  amount: 451000.0
+  billing_address: 900 Enterprise Drive, Toronto, ON M5G 2C3, Canada
+  burst_item_count: ambiguous
+  customer_key: novafleet
+  customer_signature: true
+  document_type: purchase_order
+  end_date: '2028-01-31'
+  item_count: 4
+  items:
+  - burst_cap_units: null
+    burst_percentage: 15.0
+    price: 120000.0
+    product_name: Cloud Security Suite
+    quantity: 1.0
+    total_amount: 120000.0
+  - burst_cap_units: null
+    burst_percentage: 15.0
+    price: 132000.0
+    product_name: Cloud Security Suite
+    quantity: 1.0
+    total_amount: 132000.0
+  - burst_cap_units: null
+    burst_percentage: 15.0
+    price: 145000.0
+    product_name: Cloud Security Suite
+    quantity: 1.0
+    total_amount: 145000.0
+  - burst_cap_units: null
+    burst_percentage: 15.0
+    price: 18000.0
+    product_name: Advanced Threat Monitoring
+    quantity: 3.0
+    total_amount: 54000.0
+  payment_terms: Net 45
+  signature_evidence: present
+  start_date: '2025-02-01'
+  technical_account_manager: present
