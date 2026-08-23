@@ -1,19 +1,17 @@
-# Core dependencies
-openai>=1.0.0
-pdfplumber>=0.11.0
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-requests>=2.31.0
-PyYAML>=6.0
-python-dateutil>=2.8.2
+# Runtime dependencies.
+openai>=1.0.0            # OpenAI-compatible client (OpenRouter, Ollama, ...)
+pdfplumber>=0.11.0       # PDF text + geometry (signature scan reads its objects)
+pydantic>=2.0.0          # Models, validation, field normalization
+python-dotenv>=1.0.0     # Loads .env so secrets stay out of the config files
+PyYAML>=6.0              # Field schemas and LLM/storage/pipeline config
+python-dateutil>=2.8.2   # Parses the varied date formats seen in contracts
 
-# Development tools
+# Tests.
 pytest>=7.0.0
 
-# Additional PDF processing libraries
-pdfminer.six==20251107
-pypdfium2>=4.18.0
-Pillow>=9.1
-
-# Utility libraries
-tqdm>4
+# NOTE - deliberately not listed:
+#   pdfminer.six / Pillow / pypdfium2 - pdfplumber's own dependencies. Pinning
+#     them here duplicates its metadata and risks contradicting it on upgrade.
+#   reportlab - only needed to regenerate tests/fixtures/*.pdf, which are
+#     committed. See tests/fixtures/generate_fixtures.py.
+#   requests, tqdm - were listed but never imported anywhere in src/ or tests/.

@@ -6,7 +6,7 @@ import glob
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pdfplumber
 
@@ -24,6 +24,15 @@ from .quality_checker import ExtractionQualityChecker
 # keyword (title/heading), rather than the whole body - see
 # _identify_document_type.
 DOCUMENT_TYPE_SCAN_CHARS = 1000
+
+# Keywords that identify each document type, matched against the opening of
+# the document (and, as a fallback only, the filename). "order from" is a
+# real misspelling seen in the sample set, not a typo here.
+DOCUMENT_TYPE_KEYWORDS = {
+    "purchase_order": ("purchase order", "po #"),
+    "order_form": ("order form", "order from"),
+    "invoice": ("invoice",),
+}
 
 
 class DocumentProcessor:
@@ -93,7 +102,13 @@ class DocumentProcessor:
 
         content_hash = self._content_hash(text_content, signature_finding)
 
-        document_type = self._identify_document_type(text_content)
+        document_type = self._identify_document_type(text_content) # enum
+        filename_type = self._type_from_filename(source_file)
+
+        # Content is authoritative; the filename only fills a gap it left.
+        if document_type == "generic" and filename_type:
+            document_type = filename_type
+
         customer_key = self.field_registry.identify_customer(text_content)
         self.progress.identified(document_type, customer_key)
 
@@ -112,7 +127,8 @@ class DocumentProcessor:
         self.progress.llm_call_finished(timer.seconds)
 
         result = self._check_and_maybe_retry(
-            text_content, result, document_type, customer_key, signature_hint
+            text_content, result, document_type, customer_key, signature_hint,
+            filename_type=filename_type, source_file=source_file,
         )
 
         self.repository.save(result, source_file, content_hash)
@@ -123,7 +139,8 @@ class DocumentProcessor:
         return stored
 
     def _check_and_maybe_retry(
-        self, text_content, result, document_type, customer_key, signature_hint
+        self, text_content, result, document_type, customer_key, signature_hint,
+        filename_type=None, source_file=None,
     ):
         """
         Run the quality checks, and give the model one more attempt if they
@@ -139,7 +156,15 @@ class DocumentProcessor:
             ExtractedContractData: the better of the two attempts.
         """
         warnings = self.quality_checker.check(text_content, result)
+
+        # A filename disagreeing with the content is worth surfacing but not
+        # worth a second LLM call - it is a filing problem, not an
+        # extraction one, so it is appended after the retry decision.
+        naming = self.quality_checker.check_filename(
+            document_type, filename_type, source_file)
+
         if not warnings:
+            result.warnings = naming
             return result
 
         self.progress.quality_warning(warnings, retrying=True)
@@ -160,10 +185,10 @@ class DocumentProcessor:
             # The retry did no better - keep the first result rather than
             # assuming a second attempt is automatically an improvement.
             self.progress.quality_warning(warnings, retrying=False)
-            result.warnings = warnings
+            result.warnings = warnings + naming
             return result
 
-        retried.warnings = [f"{w} (resolved on retry)" for w in warnings]
+        retried.warnings = [f"{w} (resolved on retry)" for w in warnings] + naming
         return retried
 
     @staticmethod
@@ -245,14 +270,19 @@ class DocumentProcessor:
 
     def _identify_document_type(self, text_content: str) -> str:
         """
-        Identify the type of document based on content
+        Identify a document's type from its content.
 
-        Only the opening of the document is scanned (its title/heading),
-        not the full body: an Order Form can legitimately mention "Purchase
-        Order" deep in a boilerplate section (e.g. "Is a Purchase Order (PO)
-        required for this Order Form? No") without being one, so scanning
-        the whole text risks a false match on whichever keyword happens to
-        appear first in the body rather than the document's actual type.
+        Only the opening of the document is scanned (its title/heading), not
+        the full body: an Order Form can legitimately mention "Purchase
+        Order" deep in a boilerplate section (CloudShield asks "Is a
+        Purchase Order (PO) required for... this Order Form?" at character
+        8,689) without being one.
+
+        Within that window the earliest match wins, rather than a fixed
+        if/elif precedence. A document's title is the first thing on the
+        page, so position is evidence; check order is not. Under the old
+        precedence, "purchase order" was tested first and any order form
+        mentioning a PO near the top would have been misfiled.
 
         Args:
             text_content (str): Text content of the document
@@ -260,16 +290,47 @@ class DocumentProcessor:
         Returns:
             str: Document type identifier
         """
-        lower_text = text_content[:DOCUMENT_TYPE_SCAN_CHARS].lower()
+        head = (text_content or "")[:DOCUMENT_TYPE_SCAN_CHARS].lower()
 
-        if "purchase order" in lower_text or "po #" in lower_text:
-            return "purchase_order"
-        elif "order form" in lower_text or "order from" in lower_text:
-            return "order_form"
-        elif "invoice" in lower_text:
-            return "invoice"
-        else:
-            return "generic"
+        earliest = None
+        for document_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
+            for keyword in keywords:
+                position = head.find(keyword)
+                if position != -1 and (earliest is None or position < earliest[0]):
+                    earliest = (position, document_type)
+
+        return earliest[1] if earliest else "generic"
+
+    @staticmethod
+    def _type_from_filename(file_path: str) -> Optional[str]:
+        """
+        Guess a document's type from its filename.
+
+        Never used to override the content - a filename is metadata anyone
+        can change, and this project's own sample set proves it is the less
+        reliable signal: "ACME Order From.pdf" is misspelled while the
+        document itself correctly reads "Order Form". Real inputs are worse
+        ("scan001.pdf", "document (3).pdf").
+
+        It is used only where it adds information: as a fallback when the
+        content says nothing, and as a cross-check that flags a mismatch.
+
+        Args:
+            file_path (str): Path to the document.
+
+        Returns:
+            Optional[str]: The type the name suggests, or None.
+        """
+        name = os.path.basename(file_path).lower()
+
+        earliest = None
+        for document_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
+            for keyword in keywords:
+                position = name.find(keyword)
+                if position != -1 and (earliest is None or position < earliest[0]):
+                    earliest = (position, document_type)
+
+        return earliest[1] if earliest else None
 
     def process_multiple_documents(self, file_paths: List[str]) -> Dict[str, Any]:
         """

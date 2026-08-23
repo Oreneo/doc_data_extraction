@@ -37,7 +37,7 @@ def _build_pipeline():
     Returns:
         tuple: (DocumentProcessor, SqliteContractRepository, StorageConfig,
             LLMProfile). The repository is handed back because the report
-            reads from it after processing finishes; the LLM profile so the
+            reads from it after processing finishes the LLM profile so the
             run can announce which model it's using.
     """
     llm_config = load_llm_config()

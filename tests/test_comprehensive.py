@@ -1693,6 +1693,79 @@ def test_retry_fires_once_and_only_on_a_warning():
 
     print("✓ retry behaviour test passed")
 
+def test_document_type_uses_earliest_keyword_not_check_order():
+    """
+    The earliest keyword in the document's opening wins, not a fixed
+    if/elif precedence.
+
+    Under the old precedence "purchase order" was tested first, so an order
+    form mentioning a PO near the top was misfiled. CloudShield really does
+    ask "Is a Purchase Order (PO) required for... this Order Form?" - it
+    only escaped because that sits at character 8,689, outside the scan
+    window. Position is evidence; check order is not.
+    """
+    print("Testing document type uses earliest keyword...")
+
+    from src.services.document_processor import DocumentProcessor
+
+    proc = DocumentProcessor.__new__(DocumentProcessor)
+    classify = DocumentProcessor._identify_document_type
+
+    # The case the old ordering got wrong: an order form whose opening also
+    # mentions a purchase order, PO title second.
+    tricky = ("Order Form\nThis Order Form is entered into...\n"
+              "Is a Purchase Order (PO) required for this Order Form? No")
+    assert classify(proc, tricky) == "order_form", "earliest keyword must win"
+
+    # And the reverse, to prove it isn't just always picking order_form.
+    reversed_ = ("Purchase Order - Acme Ltd.\nPO Date: 01-01-2025\n"
+                 "This Purchase Order references an Order Form.")
+    assert classify(proc, reversed_) == "purchase_order"
+
+    assert classify(proc, "Invoice #123") == "invoice"
+    assert classify(proc, "some unrelated letter") == "generic"
+    assert classify(proc, "") == "generic"
+
+    # A keyword beyond the scan window must not count - that window is what
+    # stops boilerplate deep in a contract from redefining its type.
+    far = "Order Form\n" + ("x" * 2000) + "\nPurchase Order"
+    assert classify(proc, far) == "order_form"
+
+    print("✓ document type earliest-keyword test passed")
+
+def test_filename_never_overrides_content():
+    """
+    Content decides; the filename only fills a gap and flags a mismatch.
+
+    This project's own sample set is the argument: "ACME Order From.pdf" is
+    misspelled while the document correctly reads "Order Form". A filename
+    is metadata anyone can change.
+    """
+    print("Testing filename does not override content...")
+
+    from src.services.document_processor import DocumentProcessor
+    from src.services.quality_checker import ExtractionQualityChecker
+
+    from_name = DocumentProcessor._type_from_filename
+    assert from_name("/x/Purchase Order - Acme.pdf") == "purchase_order"
+    assert from_name("/x/ACME Order From.pdf") == "order_form"  # the real typo
+    assert from_name("/x/scan001.pdf") is None
+    assert from_name("/x/document (3).pdf") is None
+
+    checker = ExtractionQualityChecker()
+
+    # Agreement, or no signal from the name: no warning.
+    assert checker.check_filename("order_form", "order_form", "/x/a.pdf") == []
+    assert checker.check_filename("order_form", None, "/x/scan001.pdf") == []
+
+    # Disagreement: warn, and say plainly that content won.
+    warned = checker.check_filename("order_form", "purchase_order", "/x/PO - weird.pdf")
+    assert len(warned) == 1
+    assert "content was used" in warned[0]
+    assert "PO - weird.pdf" in warned[0]
+
+    print("✓ filename does not override content test passed")
+
 def test_burst_headline_degrades_when_basis_is_missing():
     """
     A percentage alone says nothing useful - "15%" of what? The model does
@@ -1773,6 +1846,8 @@ def run_all_tests():
         test_quality_check_flags_dropped_burst,
         test_quality_check_no_false_positives_on_real_documents,
         test_retry_fires_once_and_only_on_a_warning,
+        test_document_type_uses_earliest_keyword_not_check_order,
+        test_filename_never_overrides_content,
         test_burst_headline_degrades_when_basis_is_missing,
         test_warnings_round_trip_and_render,
         test_failed_extraction_is_recorded_but_not_stored,

@@ -12,6 +12,7 @@ extracted from it. Nothing here consults stored data: a run's behaviour must
 depend only on the documents it was given.
 """
 
+import os
 import re
 from typing import List
 
@@ -68,6 +69,33 @@ class ExtractionQualityChecker:
         if not BURST_MENTION.search(text or ""):
             return False
         return not any(item.burst for item in result.items)
+
+    @staticmethod
+    def check_filename(document_type, filename_type, source_file) -> List[str]:
+        """
+        Flag a filename that disagrees with the document's own content.
+
+        The content decides the type; this never overrides it. But a
+        mismatch is worth surfacing - it usually means a misfiled or
+        misnamed document, and it is the kind of thing nobody notices until
+        they go looking for a contract under the wrong name.
+
+        Args:
+            document_type: The type decided from the document's content.
+            filename_type: The type the filename suggests, or None.
+            source_file: Path, for naming the file in the warning.
+
+        Returns:
+            List[str]: One warning if they disagree, else empty.
+        """
+        if not filename_type or filename_type == document_type:
+            return []
+
+        name = os.path.basename(source_file) if source_file else "the filename"
+        return [
+            f"filename suggests '{filename_type}' but the document's content "
+            f"reads as '{document_type}' - content was used ({name})"
+        ]
 
     @staticmethod
     def retry_note(warnings: List[str]) -> str:
