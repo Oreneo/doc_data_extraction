@@ -1,19 +1,55 @@
 # Document Data Extraction System
 
-A comprehensive system for extracting structured data from various document types using LLMs and PDF processing capabilities.
+Extracts structured contract data from Order Forms and Purchase Orders into a
+local relational database, using an LLM to read documents whose layouts and
+terminology vary between customers.
 
 ## Overview
 
-This system provides a robust framework for processing different types of business documents (such as purchase orders and order forms) and extracting structured data from them. It leverages PDF processing libraries to extract text content, then uses LLMs via OpenRouter API to parse and structure that data.
+Documents land in a folder. Each is read with `pdfplumber`, classified by its
+content, matched to a customer profile, and extracted against a field schema
+defined in YAML - so adapting to a new customer's wording is a config change,
+not a code change. Results are written to SQLite as header/line-item tables and
+printed back as a report.
 
-## Features
+```bash
+python -m src.main          # process the folder, store, and report
+```
 
-- Support for multiple document types (Purchase Orders, Order Forms)
-- PDF text extraction using pdfplumber
-- LLM-powered data extraction using OpenRouter API
-- Structured data output with confidence scores
-- Error handling and retry mechanisms
-- Modular architecture for easy extension
+## What it does
+
+- **Two document types** (Order Forms, Purchase Orders) sharing one field
+  schema, stored in separate table pairs.
+- **Per-customer adaptation** - a customer whose contracts say "Client Success
+  Engineer" instead of "Technical Account Manager" is handled by a YAML
+  override, no code change. Both document types have one.
+- **Structured burst terms** attached to the specific line items each clause
+  covers, including documents with different thresholds per contract year.
+- **Signature detection that sees what the text cannot** - drawn, stamped and
+  annotation-based signatures are found by scanning PDF geometry, without OCR.
+- **Self-checking extraction** - line items are reconciled against the stated
+  total, and a dropped field triggers one targeted retry rather than passing
+  silently.
+- **Measured accuracy** - scored against human-verified ground truth rather
+  than asserted. See [Accuracy](#accuracy).
+
+### Accuracy
+
+`tests/ground_truth.yaml` holds the correct values for all eight sample
+documents, read off the PDFs by hand. `tests/test_accuracy.py` scores real
+extraction against them:
+
+```
+  TOTAL                                          302/302 fields  100.0%
+  (objectively checkable fields only - free text is presence-checked,
+   and genuinely ambiguous fields are excluded)
+```
+
+Two honest qualifications. The denominator covers fields with one right answer;
+free-text fields (`signature_evidence`, `technical_account_manager`) are
+checked for presence, because the model rewords them every run and is right
+every time. And one score is one run - see
+[Known limitations](#known-limitations) for what varies between runs.
 
 ## Architecture
 
@@ -36,6 +72,7 @@ document_extraction/
 │   │   └── templates/
 │   ├── services/                # Core service classes
 │   │   ├── llm_service.py       # LLM interaction service
+│   │   ├── quality_checker.py   # Catches silently dropped fields
 │   │   └── document_processor.py # Document processing orchestrator
 │   ├── extractors/
 │   │   └── contract_extractor.py # Extracts the canonical contract field schema
@@ -44,14 +81,19 @@ document_extraction/
 │   │   ├── database.py          # Connection + schema management
 │   │   └── contract_repository.py # Saving/loading extraction results
 │   ├── reporting/
-│   │   └── console_reporter.py  # Formats stored results for the console
+│   │   ├── console_reporter.py  # Formats stored results for the console
+│   │   └── progress_reporter.py # Live progress while a run is in flight
 │   ├── models/                  # Pydantic data models
 │   └── utils/
 │       ├── normalization.py     # Date / payment-terms normalization
 │       ├── signature_ink.py     # Detects drawn/scanned signatures (no OCR)
 │       └── reset_documents.py   # Clear stored records
-├── tests/                       # Test suite (no API key required)
-├── plans/                       # Design plans for major changes
+├── sample_docs/                 # The documents processed by a default run
+├── tests/                       # Test suite (no API key required by default)
+│   ├── ground_truth.yaml        # Verified correct values, for accuracy scoring
+│   └── fixtures/                # Generated PDFs (signed, unsigned, adversarial)
+├── scripts/                     # One-off tools (ground-truth export)
+├── plans/                       # Design plans and rationale for major changes
 ├── data/                        # Generated SQLite database (gitignored)
 ├── requirements.txt             # Project dependencies
 └── README.md                    # This file
@@ -473,7 +515,21 @@ print(results)
 
 All three sit behind `AbstractContractRepository`, so the extraction layer never imports `sqlite3` and swapping in a different store means replacing one class.
 
-### 7. Console Reporter (`reporting/console_reporter.py`)
+### 7. Quality Checker (`services/quality_checker.py`)
+- Compares each result against the document's own text and flags fields that
+  look silently dropped
+- Supplies the corrective note for the single retry - the retry has to *differ*
+  from the first prompt, since at temperature 0 an identical prompt returns an
+  identical answer
+- Also flags a filename that disagrees with the document's content
+
+### 8. Signature Ink Detector (`utils/signature_ink.py`)
+- Finds drawn, stamped and annotation-based signatures that text extraction
+  cannot see, by scanning PDF geometry - no OCR
+- Attributes a mark to the party whose signature area it overlaps most, so one
+  party's signature is not credited to the other
+
+### 9. Console Reporter (`reporting/console_reporter.py`)
 - Renders stored contracts grouped by document type, with aligned line-item tables
 - Collapses a burst clause that's identical across every item into one line, since a whole-order clause is replicated per item
 - Reports reconciliation (line items vs. stated total) as an accuracy signal
@@ -486,26 +542,68 @@ Both **Purchase Orders** and **Order Forms** are extracted against the same fiel
 
 ## Testing
 
-Tests live in `tests/` and need no API key or network access - LLM calls are stubbed, and the storage tests run against an in-memory SQLite database.
+Tests live in `tests/`. **The default run needs no API key and no network** -
+LLM calls are stubbed and storage runs against an in-memory SQLite database:
 
 ```bash
-# Run everything
-python -m pytest tests/ -q
-
-# Or run the main suite directly
-python tests/test_comprehensive.py
+python -m pytest tests/ -q          # 63 tests, free, deterministic
 ```
 
-`tests/test_comprehensive.py` is the real suite (24 tests: extraction, field-registry overrides, storage, and reporting). `test_imports.py`, `test_basic.py`, and `final_test.py` are older smoke-test scripts whose checks are all covered by it.
+`tests/test_comprehensive.py` is the main suite: extraction, field-registry
+overrides, storage and its migrations, reporting, signature detection, quality
+checks and the retry. `test_imports.py`, `test_basic.py` and `final_test.py`
+are older smoke scripts whose checks it now covers.
 
-## Contributing
+### Tests that cost money
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+Two are opt-in, because they call the real model and are non-deterministic.
+Neither should gate CI:
 
-## License
+```bash
+# Score extraction against tests/ground_truth.yaml and print the scorecard (~16c)
+RUN_LIVE_ACCURACY=1 python tests/test_accuracy.py
 
-MIT License
+# Fire the adversarial document at the pipeline and check it isn't obeyed (~2c)
+RUN_LIVE_INJECTION=1 python -m pytest tests/test_comprehensive.py -q -k injection
+```
+
+The free half of `test_accuracy.py` still runs by default: it validates the
+ground-truth file itself - that it covers every document in `sample_docs/`,
+that item counts match, and that each stated amount equals the sum of its line
+items. A ground-truth file that has drifted from the documents would otherwise
+inflate any score computed from it.
+
+### Regenerating fixtures
+
+`tests/fixtures/*.pdf` are committed, so nothing needs regenerating to run the
+suite. To change them:
+
+```bash
+pip install reportlab        # not a project dependency
+python tests/fixtures/generate_fixtures.py
+```
+
+## Known limitations
+
+Recorded deliberately - each is measured or reasoned rather than assumed, and
+`plans/` holds the analysis behind them.
+
+- **Burst extraction is unreliable on the most complex document.** CloudShield
+  (10,000 characters, six line items, three per-year thresholds) drops burst
+  terms on the *first* attempt roughly half the time. The quality check has
+  caught every occurrence and the retry has recovered every one, so no data is
+  lost - the cost is a second LLM call. Analysis and a proposed fix:
+  `plans/burst-reliability.md` (deliberately not built).
+- **One ambiguous field.** NovaFleet's burst clause covers "monitored
+  workloads", which matches no single product line. The model attaches it to
+  one item on some runs and all items on others; both are defensible readings
+  of the document, so accuracy scoring excludes it rather than freezing an
+  arbitrary answer.
+- **Only two document types have tables.** `invoice` is recognised but stored
+  as `skipped_type` - no field schema or sample exists for it.
+- **Prompt injection is mitigated, not solved.** See
+  [Untrusted document text](#untrusted-document-text).
+- **Cryptographic signatures are not validated.** The signature scan detects
+  that a mark is present, never that it is authentic.
+- **Serial processing.** Documents are handled one at a time; LLM calls
+  dominate the runtime, so this is the obvious place to parallelise.
