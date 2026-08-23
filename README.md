@@ -99,23 +99,54 @@ document_extraction/
 └── README.md                    # This file
 ```
 
-## Installation
+## Quick start
 
-1. Create a virtual environment:
 ```bash
+# 1. Create and activate a virtual environment
 python3 -m venv venv
 source venv/bin/activate
-```
 
-2. Install dependencies:
-```bash
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Create your .env from the example
+cp .env.example .env
+
+# 4. Open .env and paste your OpenRouter API key:
+#      OPENROUTER_API_KEY=sk-or-v1-...
+#    Get one at https://openrouter.ai/keys - no payment method needed for
+#    free-tier models. See Configuration for choosing a model.
+
+# 5. Run it - processes every PDF in sample_docs/, stores to SQLite,
+#    and prints the results
+python3 src/main.py
 ```
 
-3. Set up your OpenRouter API key in a `.env` file:
+Copy `.env.example` rather than creating `.env` from scratch: it carries the
+commented `LLM_PROFILE` override you will want if you switch models.
+
+`python3 src/main.py` and `python3 -m src.main` are equivalent.
+
+### Re-running
+
+Wiping first is a good habit, and worth doing before any run whose output
+someone else will read:
+
 ```bash
-echo "OPENROUTER_API_KEY=your_api_key_here" > .env
+python3 -m src.utils.reset_documents --all      # start from an empty database
+python3 src/main.py
 ```
+
+It guarantees the report describes exactly the documents currently in the
+folder. Records of files you have since renamed or removed would otherwise
+linger, and the report's `Not shown` line would count them - which is
+confusing when you are trying to demonstrate a clean result.
+
+It is not required for *correctness*, though. Every run re-extracts every
+document from scratch and replaces that file's previous record: stored results
+are output, never a cache that changes what a later run does. So re-running
+without wiping never produces stale values or duplicate rows - the only thing
+a wipe removes is history for documents that are no longer there.
 
 ## Configuration
 
