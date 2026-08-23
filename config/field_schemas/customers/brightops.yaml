@@ -1,10 +1,21 @@
 # Customer profile: BrightOps Analytics Ltd. (Purchase Order)
 #
-# No field overrides needed - BrightOps's purchase orders already use the
-# spec's exact terminology ("Net 30", "Technical Account Manager", etc.),
-# so the base field definitions apply as-is.
+# BrightOps sends purchase orders in two shapes. The original template uses
+# the spec's exact terminology ("Net 30", "Technical Account Manager"); a
+# later one states payment terms in prose, dates in long form, and names the
+# assigned contact a "Client Success Engineer". The override below is what
+# lets one customer profile cover both without touching the base schema -
+# the same mechanism ACME needs for its order forms.
 
 match_keywords:
   - "BrightOps"
 
-overrides: []
+overrides:
+  - name: technical_account_manager
+    description: >
+      This customer does not consistently use the term "Technical Account
+      Manager". Look also for equivalent language such as a "Client Success
+      Engineer" or another named contact assigned to the buyer for the
+      contract term, usually listed under "Special Terms". Capture whichever
+      wording the document uses. Set to null only if no such assigned
+      contact is mentioned at all.
